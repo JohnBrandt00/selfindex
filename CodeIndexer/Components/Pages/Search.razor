@@ -1,0 +1,227 @@
+@page "/search"
+@using CodeIndexer.Models
+@using CodeIndexer.Services
+@inject LuceneIndexService Lucene
+@inject VectorIndexService Vectors
+@inject EmbeddingService Embeddings
+@inject IndexingState State
+
+<h4 class="mb-3">Search Code Index</h4>
+
+<div class="row g-2 mb-3">
+  <div class="col">
+    <input class="form-control font-monospace"
+           @bind="_query"
+           @bind:event="oninput"
+           @onkeydown="OnKeyDown"
+           placeholder="Ask about the code... (Enter to search)" />
+  </div>
+  <div class="col-auto">
+    <div class="btn-group">
+      <button class="btn @ModeBtn("hybrid")"  @onclick='() => _mode = "hybrid"'>Hybrid</button>
+      <button class="btn @ModeBtn("vector")"  @onclick='() => _mode = "vector"'>Vector</button>
+      <button class="btn @ModeBtn("text")"    @onclick='() => _mode = "text"'>BM25</button>
+    </div>
+  </div>
+  <div class="col-auto">
+    <button class="btn btn-success" @onclick="RunSearch" disabled="@_searching">
+      @(_searching ? "Searching..." : "Search")
+    </button>
+  </div>
+</div>
+
+<div class="row g-2 mb-2">
+  <div class="col-auto d-flex align-items-center">
+    <span class="text-muted small me-2">Exclude files:</span>
+    <input class="form-control form-control-sm font-monospace" style="width:320px"
+           @bind="_exclude"
+           @bind:event="oninput"
+           placeholder="e.g. test, migrations, *.min.js" />
+  </div>
+</div>
+
+<div class="text-muted small mb-3 d-flex gap-3 align-items-center flex-wrap">
+  <span>Lucene: <strong>@Lucene.DocumentCount</strong></span>
+  <span>HNSW: <strong>@Vectors.LiveEntries</strong> live</span>
+  <span>@Embeddings.Model @(Embeddings.Dimensions > 0 ? $"({Embeddings.Dimensions}d)" : "")</span>
+  <span class="badge @(_mode == "hybrid" ? "bg-primary" : "bg-secondary")">
+    @(_mode == "hybrid" ? "RRF hybrid" : _mode == "vector" ? "HNSW cosine" : "BM25 keyword")
+  </span>
+  <div class="form-check form-switch mb-0 ms-1">
+    <input class="form-check-input" type="checkbox" id="rawToggle" @bind="_rawLucene" />
+    <label class="form-check-label" for="rawToggle">Raw Lucene syntax</label>
+  </div>
+  <a href="/ai-endpoint" class="ms-auto text-muted small">MCP endpoint →</a>
+</div>
+
+@if (_error != null) { <div class="alert alert-danger">@_error</div> }
+
+@if (_results.Count > 0)
+{
+  <div class="mb-2 text-muted small">@_results.Count results in @_elapsedMs ms</div>
+  @foreach (var r in _results)
+  {
+    <div class="card mb-2 result-card">
+      <div class="card-header d-flex justify-content-between align-items-center py-1">
+        <div>
+          <span class="badge @BadgeColor(r.ChunkType) me-1">@r.ChunkType</span>
+          <span class="fw-semibold">@r.Symbol</span>
+          <span class="text-muted small ms-2 font-monospace">@r.RelativePath:@r.StartLine</span>
+        </div>
+        <div class="small text-muted font-monospace">
+          @if (r.BM25Score > 0)   { <span class="me-2">bm25: @r.BM25Score.ToString("F3")</span> }
+          @if (r.VectorScore > 0) { <span class="me-2">cos: @r.VectorScore.ToString("F3")</span> }
+          @if (r.HybridScore > 0) { <span>rrf: @r.HybridScore.ToString("F4")</span> }
+        </div>
+      </div>
+      <div class="card-body p-0">
+        <pre class="code-preview m-0 p-2">@TrimContent(r.Content)</pre>
+      </div>
+    </div>
+  }
+}
+else if (_searched && !_searching)
+{
+  <div class="text-muted">No results for "<em>@_query</em>".</div>
+}
+else if (!State.IsWatching && Lucene.DocumentCount == 0)
+{
+  <div class="alert alert-info">
+    No index yet — go to the <a href="/">Dashboard</a> and point it at a repo.
+  </div>
+}
+
+@code {
+    private string _query   = "";
+    private string _exclude = "";
+    private string _mode    = "hybrid";
+    private bool _searching, _searched, _rawLucene;
+    private string? _error;
+    private long _elapsedMs;
+    private List<SearchResult> _results = [];
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await RunSearch();
+    }
+
+    private async Task RunSearch()
+    {
+        if (string.IsNullOrWhiteSpace(_query)) return;
+        _searching = true; _error = null; _searched = true;
+        StateHasChanged();
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var raw = _mode switch
+            {
+                "text"   => Lucene.TextSearch(_query, 15, _rawLucene).Select(t => t.result).ToList(),
+                "vector" => await RunVectorAsync(),
+                _        => await RunHybridAsync()
+            };
+            _results = ApplyExclusions(raw);
+            _elapsedMs = sw.ElapsedMilliseconds;
+        }
+        catch (Exception ex) { _error = ex.Message; _results = []; }
+        finally { _searching = false; }
+    }
+
+    private async Task<List<SearchResult>> RunVectorAsync()
+    {
+        var emb = await Embeddings.EmbedAsync(_query);
+        return Lucene.FetchByKeys(Vectors.Search(emb, 15));
+    }
+
+    private async Task<List<SearchResult>> RunHybridAsync()
+    {
+        const int k = 60;
+        var emb        = await Embeddings.EmbedAsync(_query);
+        var textHits   = Lucene.TextSearch(_query, 45, _rawLucene);
+        var vectorHits = Vectors.Search(emb, 45);
+
+        // When raw Lucene is on, filter vector results through the same query
+        // so NOT clauses (e.g. NOT file:docker-compose.yml) apply to both sides
+        if (_rawLucene && !string.IsNullOrWhiteSpace(_query))
+        {
+            var allowed = Lucene.FilterKeysByQuery(vectorHits.Select(h => h.key), _query);
+            vectorHits = vectorHits.Where(h => allowed.Contains(h.key)).ToList();
+        }
+
+        var rrf = new Dictionary<string, (float score, float bm25, float vec)>(StringComparer.Ordinal);
+        for (int rank = 0; rank < textHits.Count; rank++)
+        {
+            var (key, bm25, _) = textHits[rank];
+            if (key == "") continue;
+            rrf[key] = (1f / (k + rank + 1), bm25, 0);
+        }
+        for (int rank = 0; rank < vectorHits.Count; rank++)
+        {
+            var (key, cos) = vectorHits[rank];
+            float c = 1f / (k + rank + 1);
+            rrf[key] = rrf.TryGetValue(key, out var e) ? (e.score + c, e.bm25, cos) : (c, 0, cos);
+        }
+
+        var ranked = rrf.OrderByDescending(kv => kv.Value.score).Take(15).ToList();
+        var docs   = Lucene.FetchByKeys(ranked.Select(kv => (kv.Key, kv.Value.vec)));
+        foreach (var doc in docs)
+        {
+            var key = $"{doc.FilePath}:{doc.StartLine}";
+            if (rrf.TryGetValue(key, out var s))
+            { doc.BM25Score = s.bm25; doc.VectorScore = s.vec; doc.HybridScore = s.score; }
+        }
+        return docs.OrderByDescending(d => d.HybridScore).ToList();
+    }
+
+    private List<SearchResult> ApplyExclusions(List<SearchResult> results)
+    {
+        var patterns = _exclude.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(p => p.Length > 0)
+            .ToList();
+        if (patterns.Count == 0) return results;
+
+        return results.Where(r => !patterns.Any(p => MatchesPattern(r.RelativePath, p))).ToList();
+    }
+
+    private static bool MatchesPattern(string path, string pattern)
+    {
+        // Simple glob: * matches any sequence of chars within a segment, ** matches across /
+        // For basic use, just check if any path segment or the full path contains the pattern (case-insensitive)
+        // Support leading/trailing * as wildcard, otherwise substring match
+        path = path.Replace('\\', '/').ToLowerInvariant();
+        pattern = pattern.ToLowerInvariant();
+
+        if (pattern.Contains('*'))
+        {
+            // Convert glob to a simple check: split on * and verify all parts appear in order
+            var parts = pattern.Split('*', StringSplitOptions.RemoveEmptyEntries);
+            int pos = 0;
+            foreach (var part in parts)
+            {
+                int idx = path.IndexOf(part, pos, StringComparison.Ordinal);
+                if (idx < 0) return false;
+                pos = idx + part.Length;
+            }
+            return true;
+        }
+
+        // No wildcard: match against any path segment or the full path
+        return path.Contains(pattern) ||
+               path.Split('/').Any(seg => seg == pattern);
+    }
+
+    private static string TrimContent(string content)
+    {
+        var lines = content.Split('\n');
+        return lines.Length > 20 ? string.Join('\n', lines.Take(20)) + "\n..." : content;
+    }
+
+    private string ModeBtn(string m) => _mode == m ? "btn-primary" : "btn-outline-primary";
+
+    private static string BadgeColor(string type) => type switch
+    {
+        "class"  => "bg-primary",
+        "method" => "bg-info text-dark",
+        "file"   => "bg-secondary",
+        _        => "bg-dark"
+    };
+}

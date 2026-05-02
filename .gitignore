@@ -1,0 +1,32 @@
+## .NET
+bin/
+obj/
+*.user
+.vs/
+*.suo
+*.swp
+*.rsuser
+.idea/
+
+## Lucene + HNSW index data (runtime artifacts)
+**/lucene-index/
+**/hnsw/
+
+## NuGet
+packages/
+*.nupkg
+project.lock.json
+project.fragment.lock.json
+
+## OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+## Logs
+*.log
+logs/
+
+## Secrets / local overrides
+appsettings.Local.json
+appsettings.*.local.json

@@ -1,0 +1,101 @@
+@page "/ai-endpoint"
+@using CodeIndexer.Services
+@inject IConfiguration Config
+
+<h4 class="mb-3">AI / MCP Endpoint</h4>
+
+<p class="text-muted">
+  This app exposes its code search as an <strong>MCP (Model Context Protocol) server</strong> at
+  <code>@McpUrl</code>. Any MCP-compatible AI agent can connect and call the tools below.
+</p>
+
+<div class="row g-3">
+
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">Connect Claude Desktop</div>
+      <div class="card-body">
+        <p class="small text-muted">Add to <code>claude_desktop_config.json</code>:</p>
+        <pre class="code-preview p-2">@ClaudeConfig</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">Connect via Semantic Kernel</div>
+      <div class="card-body">
+        <pre class="code-preview p-2">@SkExample</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header">Available Tools</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Tool</th><th>Parameters</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>SearchCode</code></td>
+              <td class="small font-monospace">query, mode?, topN?</td>
+              <td class="small">Hybrid/vector/keyword search over indexed C# chunks. Returns file paths, line numbers, and code.</td>
+            </tr>
+            <tr>
+              <td><code>GetIndexStats</code></td>
+              <td class="small font-monospace">—</td>
+              <td class="small">Returns what repo is indexed, chunk counts, embedding model in use.</td>
+            </tr>
+            <tr>
+              <td><code>GetFileContent</code></td>
+              <td class="small font-monospace">relativePath</td>
+              <td class="small">Read the full source of any file in the indexed repo.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header">Example agent prompts</div>
+      <div class="card-body">
+        <ul class="mb-0 small">
+          <li>"Find where authentication is handled in this repo"</li>
+          <li>"Show me all classes that implement IDisposable"</li>
+          <li>"How is the HNSW index persisted to disk?"</li>
+          <li>"What does the IndexingOrchestrator do and how does it watch for file changes?"</li>
+          <li>"Find any code that calls the Ollama API"</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+@code {
+    private string McpUrl => "http://localhost:5000/mcp";
+
+    private string ClaudeConfig =>
+        "{\n" +
+        "  \"mcpServers\": {\n" +
+        "    \"code-indexer\": {\n" +
+        "      \"url\": \"" + McpUrl + "\"\n" +
+        "    }\n" +
+        "  }\n" +
+        "}";
+
+    private string SkExample =>
+        "var kernel = Kernel.CreateBuilder().Build();\n\n" +
+        "// Add MCP tools from this server\n" +
+        "var mcpClient = await McpClientFactory\n" +
+        "    .CreateAsync(\"" + McpUrl + "\");\n\n" +
+        "var tools = await mcpClient.ListToolsAsync();\n" +
+        "kernel.Plugins.AddFromFunctions(\"CodeSearch\",\n" +
+        "    tools.Select(t => t.AsKernelFunction()));\n\n" +
+        "// Now ask the kernel\n" +
+        "var result = await kernel.InvokePromptAsync(\n" +
+        "    \"Find where embeddings are stored\");";
+}

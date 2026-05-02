@@ -1,0 +1,45 @@
+html, body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #f8f9fa;
+}
+
+.log-panel {
+    height: 200px;
+    overflow-y: auto;
+    background: #1e1e1e;
+    color: #d4d4d4;
+    border-radius: 4px;
+}
+
+.log-panel > div {
+    padding: 1px 4px;
+    border-bottom: 1px solid #2d2d2d;
+}
+
+.code-preview {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    font-size: 0.75rem;
+    max-height: 250px;
+    overflow: auto;
+    border-radius: 0;
+    white-space: pre;
+    tab-size: 4;
+}
+
+.result-card {
+    border-left: 3px solid #0d6efd;
+}
+
+.result-card:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+
+.display-6 {
+    font-size: 1.8rem;
+}
+
+.navbar-brand {
+    font-size: 1.1rem;
+    letter-spacing: 0.05em;
+}

@@ -1,0 +1,15 @@
+@inherits LayoutComponentBase
+
+<div class="d-flex flex-column vh-100">
+    <nav class="navbar navbar-dark bg-dark px-3">
+        <span class="navbar-brand fw-bold">&#x1F4C1; Code Indexer</span>
+        <div class="d-flex gap-3">
+            <a href="/" class="nav-link text-white">Dashboard</a>
+            <a href="/search" class="nav-link text-white">Search</a>
+            <a href="/ai-endpoint" class="nav-link text-white">MCP</a>
+        </div>
+    </nav>
+    <div class="flex-grow-1 overflow-auto p-3">
+        @Body
+    </div>
+</div>

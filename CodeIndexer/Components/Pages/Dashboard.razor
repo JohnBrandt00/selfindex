@@ -1,0 +1,249 @@
+@page "/"
+@using CodeIndexer.Services
+@inject IndexingState State
+@inject IndexingOrchestrator Orchestrator
+@inject EmbeddingService Embeddings
+@inject LuceneIndexService Lucene
+@inject VectorIndexService Vectors
+@implements IDisposable
+
+<h4 class="mb-3">Dashboard</h4>
+
+<div class="row g-3">
+
+  <!-- Config card -->
+  <div class="col-md-5">
+    <div class="card h-100">
+      <div class="card-header">Configuration</div>
+      <div class="card-body">
+        <div class="mb-2">
+          <label class="form-label fw-semibold">C# Repo Path</label>
+          <div class="input-group">
+            <input class="form-control font-monospace" @bind="_repoPath" @bind:event="oninput" placeholder="C:\path\to\repo" />
+            <button class="btn btn-primary" @onclick="StartIndexing" disabled="@(_busy || State.IsIndexing)">
+              @(State.IsWatching ? "Re-index" : "Index")
+            </button>
+          </div>
+          @if (_pathError != null)
+          {
+            <div class="text-danger small mt-1">@_pathError</div>
+          }
+          @if (_statusMsg != null)
+          {
+            <div class="text-primary small mt-1">@_statusMsg</div>
+          }
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label fw-semibold">Ollama Model</label>
+          <div class="d-flex align-items-center gap-2">
+            <span class="font-monospace">@Embeddings.Model</span>
+            <span class="badge @(_ollamaOk ? "bg-success" : "bg-danger")">
+              @(_ollamaOk ? "connected" : "offline")
+            </span>
+          </div>
+          @if (Embeddings.Dimensions > 0)
+          {
+            <small class="text-muted">@Embeddings.Dimensions dimensions</small>
+          }
+        </div>
+
+        <div>
+          <label class="form-label fw-semibold">Lucene Index</label>
+          <div class="font-monospace small text-muted">@Lucene.IndexPath</div>
+          <div><span class="badge bg-secondary">@Lucene.DocumentCount chunks</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progress card -->
+  <div class="col-md-7">
+    <div class="card h-100">
+      <div class="card-header d-flex justify-content-between">
+        <span>Indexing Progress</span>
+        @if (State.IsIndexing)
+        {
+          <span class="spinner-border spinner-border-sm text-primary" role="status"></span>
+        }
+        else if (State.IsWatching)
+        {
+          <span class="badge bg-success">Watching for changes</span>
+        }
+      </div>
+      <div class="card-body">
+        <div class="row text-center mb-3">
+          <div class="col">
+            <div class="display-6 fw-bold">@State.ProcessedFiles / @State.TotalFiles</div>
+            <div class="text-muted small">Files</div>
+          </div>
+          <div class="col">
+            <div class="display-6 fw-bold">@State.IndexedChunks</div>
+            <div class="text-muted small">Chunks</div>
+          </div>
+          <div class="col">
+            <div class="display-6 fw-bold">@Lucene.DocumentCount</div>
+            <div class="text-muted small">Lucene</div>
+          </div>
+          <div class="col">
+            <div class="display-6 fw-bold">@Vectors.LiveEntries</div>
+            <div class="text-muted small">HNSW</div>
+          </div>
+        </div>
+
+        @if (State.IsIndexing && State.TotalFiles > 0)
+        {
+          var pct = (int)(100.0 * State.ProcessedFiles / State.TotalFiles);
+          <div class="progress mb-2" style="height:20px">
+            <div class="progress-bar progress-bar-striped progress-bar-animated"
+                 style="width:@pct%">@pct%</div>
+          </div>
+          @if (!string.IsNullOrEmpty(State.CurrentFile))
+          {
+            <div class="text-muted small font-monospace text-truncate">
+              @State.CurrentFile
+            </div>
+          }
+        }
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header">Activity Log</div>
+      <div class="card-body p-0">
+        <div class="log-panel font-monospace small p-2">
+          @foreach (var line in State.Log)
+          {
+            <div>@line</div>
+          }
+          @if (!State.Log.Any())
+          {
+            <div class="text-muted">No activity yet.</div>
+          }
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent embeddings preview -->
+  @if (_recent.Any())
+  {
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header">Recently Indexed Chunks (embedding preview)</div>
+        <div class="card-body p-0">
+          <table class="table table-sm table-hover mb-0">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Symbol</th>
+                <th>Type</th>
+                <th>Lines</th>
+              </tr>
+            </thead>
+            <tbody>
+              @foreach (var r in _recent)
+              {
+                <tr>
+                  <td class="font-monospace small text-truncate" style="max-width:250px" title="@r.FilePath">
+                    @r.RelativePath
+                  </td>
+                  <td class="small">@r.Symbol</td>
+                  <td><span class="badge bg-secondary">@r.ChunkType</span></td>
+                  <td class="small">@r.StartLine–@r.EndLine</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  }
+
+</div>
+
+@code {
+    private string _repoPath = "";
+    private string? _pathError;
+    private string? _statusMsg;
+    private bool _busy;
+    private bool _ollamaOk;
+    private List<CodeIndexer.Models.SearchResult> _recent = [];
+    private System.Threading.Timer? _refreshTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.OnChanged += OnStateChanged;
+        _ollamaOk = await Embeddings.PingAsync();
+        _recent = Lucene.GetRecent(15);
+        _refreshTimer = new System.Threading.Timer(_ => InvokeAsync(RefreshRecent), null, 2000, 2000);
+    }
+
+    private void OnStateChanged() => InvokeAsync(StateHasChanged);
+
+    private async Task RefreshRecent()
+    {
+        _recent = Lucene.GetRecent(15);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task StartIndexing()
+    {
+        _pathError = null;
+        _statusMsg = null;
+
+        var path = _repoPath?.Trim() ?? "";
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            _pathError = "Enter a path first.";
+            return Task.CompletedTask;
+        }
+        if (!Directory.Exists(path))
+        {
+            _pathError = $"Directory not found: \"{path}\"";
+            return Task.CompletedTask;
+        }
+
+        _busy = true;
+        _statusMsg = $"Starting… ({path})";
+
+        // Fire-and-forget — Blazor re-renders immediately after this method returns
+        // because it's no longer async (no awaits), so _busy and _statusMsg show instantly.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Orchestrator.StartWatchingAsync(path);
+            }
+            catch (Exception ex)
+            {
+                await InvokeAsync(() =>
+                {
+                    _pathError = $"Error: {ex.Message}";
+                    _statusMsg = null;
+                    _busy = false;
+                    StateHasChanged();
+                });
+                State.AddLog($"Fatal: {ex.Message}");
+            }
+            finally
+            {
+                _busy = false;
+                _statusMsg = null;
+                await InvokeAsync(StateHasChanged);
+            }
+        });
+
+        return Task.CompletedTask;
+    }
+
+    public void Dispose()
+    {
+        State.OnChanged -= OnStateChanged;
+        _refreshTimer?.Dispose();
+    }
+}
