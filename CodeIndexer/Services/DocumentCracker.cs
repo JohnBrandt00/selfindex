@@ -96,8 +96,8 @@ public class DocumentCracker(VisionService vision, ILogger<DocumentCracker> logg
         try
         {
             if (img.TryGetPng(out var png) && png is { Length: > 1024 }) return png;
-            var raw = img.RawBytes;
-            return raw.Count > 1024 ? [.. raw] : null;
+            var raw = img.RawBytes.ToArray();
+            return raw.Length > 1024 ? raw : null;
         }
         catch { return null; }
     }
@@ -297,11 +297,14 @@ public class DocumentCracker(VisionService vision, ILogger<DocumentCracker> logg
         htmlDoc.Load(filePath);
 
         // Remove script and style noise
-        foreach (var node in htmlDoc.DocumentNode.SelectNodes("//script|//style") ?? [])
-            node.Remove();
+        var noiseNodes = htmlDoc.DocumentNode.SelectNodes("//script|//style");
+        if (noiseNodes != null)
+            foreach (var node in noiseNodes.ToList())
+                node.Remove();
 
-        var paragraphs = htmlDoc.DocumentNode
-            .SelectNodes("//p|//h1|//h2|//h3|//h4|//h5|//h6|//li|//td|//th|//pre|//blockquote") ?? [];
+        var paragraphNodes = htmlDoc.DocumentNode
+            .SelectNodes("//p|//h1|//h2|//h3|//h4|//h5|//h6|//li|//td|//th|//pre|//blockquote");
+        var paragraphs = paragraphNodes ?? new HtmlNodeCollection(null);
 
         var lines = paragraphs
             .Select(n => HtmlEntity.DeEntitize(n.InnerText).Trim())

@@ -15,6 +15,8 @@ builder.Services.AddHttpClient("ollama", c =>
 builder.Services.AddSingleton<LuceneIndexService>();
 builder.Services.AddSingleton<VectorIndexService>();
 builder.Services.AddSingleton<EmbeddingService>();
+builder.Services.AddSingleton<VisionService>();
+builder.Services.AddSingleton<DocumentCracker>();
 builder.Services.AddSingleton<IndexingState>();
 builder.Services.AddSingleton<IndexingOrchestrator>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexingOrchestrator>());

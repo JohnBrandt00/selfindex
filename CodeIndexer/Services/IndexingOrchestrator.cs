@@ -7,6 +7,7 @@ public class IndexingOrchestrator : BackgroundService
     private readonly EmbeddingService _embeddings;
     private readonly LuceneIndexService _lucene;
     private readonly VectorIndexService _vectors;
+    private readonly DocumentCracker _cracker;
     private readonly IndexingState _state;
     private readonly ILogger<IndexingOrchestrator> _logger;
     private readonly HashSet<string> _extensions;
@@ -19,6 +20,7 @@ public class IndexingOrchestrator : BackgroundService
         EmbeddingService embeddings,
         LuceneIndexService lucene,
         VectorIndexService vectors,
+        DocumentCracker cracker,
         IndexingState state,
         IConfiguration config,
         ILogger<IndexingOrchestrator> logger)
@@ -26,6 +28,7 @@ public class IndexingOrchestrator : BackgroundService
         _embeddings = embeddings;
         _lucene = lucene;
         _vectors = vectors;
+        _cracker = cracker;
         _state = state;
         _logger = logger;
 
@@ -118,7 +121,7 @@ public class IndexingOrchestrator : BackgroundService
     {
         try
         {
-            var chunks = CodeChunker.Chunk(filePath, repoRoot);
+            var chunks = await _cracker.CrackAsync(filePath, repoRoot, ct);
             _state.FileStart(filePath, chunks.Count);
 
             var contents = chunks.Select(c => c.Content).ToList();

@@ -219,9 +219,15 @@ else if (!State.IsWatching && Lucene.DocumentCount == 0)
 
     private static string BadgeColor(string type) => type switch
     {
-        "class"  => "bg-primary",
-        "method" => "bg-info text-dark",
-        "file"   => "bg-secondary",
-        _        => "bg-dark"
+        "class"   => "bg-primary",
+        "method"  => "bg-info text-dark",
+        "file"    => "bg-secondary",
+        "page"    => "bg-danger",
+        "slide"   => "bg-warning text-dark",
+        "sheet"   => "bg-success",
+        "section" => "bg-secondary",
+        "image"   => "bg-secondary",
+        "block"   => "bg-dark",
+        _         => "bg-dark"
     };
 }

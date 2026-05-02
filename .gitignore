@@ -27,6 +27,9 @@ desktop.ini
 *.log
 logs/
 
+## Claude Code local state
+.claude/settings.local.json
+
 ## Secrets / local overrides
 appsettings.Local.json
 appsettings.*.local.json
