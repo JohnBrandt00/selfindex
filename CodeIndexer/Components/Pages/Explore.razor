@@ -3,41 +3,57 @@
 @using CodeIndexer.Models
 @inject VectorIndexService Vectors
 @inject LuceneIndexService Lucene
+@inject EmbeddingService Embeddings
 @inject IJSRuntime JS
 @implements IDisposable
 
 <div class="explore-layout">
 
   <!-- Toolbar -->
-  <div class="explore-toolbar d-flex align-items-center gap-3 px-3 py-2">
-    <span class="fw-semibold">Embedding Explorer</span>
-    <span class="badge bg-secondary">@_points.Count vectors</span>
-    <span class="badge bg-dark">@Vectors.Dimensions d</span>
+  <div class="explore-toolbar px-3">
+    <span class="fw-semibold text-white me-3">Embedding Explorer</span>
+    <span class="badge bg-secondary me-1">@_points.Count pts</span>
+    <span class="badge" style="background:#21262d;color:#8b949e">@Vectors.Dimensions d</span>
+
     @if (_projecting)
     {
-      <span class="spinner-border spinner-border-sm text-light"></span>
-      <span class="text-white-50 small">Projecting…</span>
+      <span class="spinner-border spinner-border-sm text-light ms-2"></span>
+      <span class="text-white-50 small ms-1">Projecting…</span>
     }
+    @if (_searching)
+    {
+      <span class="spinner-border spinner-border-sm text-info ms-2"></span>
+      <span class="text-info small ms-1">Embedding…</span>
+    }
+
     <div class="ms-auto d-flex gap-2 align-items-center">
-      <span class="text-white-50 small">Color by</span>
-      <select class="form-select form-select-sm" style="width:120px" @onchange="OnColorByChange">
-        <option value="type">Chunk type</option>
-        <option value="file">File</option>
+      <!-- Search query input -->
+      <input class="form-control form-control-sm explore-search-input"
+             placeholder="Search query to overlay…"
+             @bind="_searchQuery" @bind:event="oninput"
+             @onkeydown="OnSearchKeyDown" />
+      <button class="btn btn-sm btn-info px-3" @onclick="RunQueryOverlay" disabled="@(_searching || _projecting)">Go</button>
+
+      <div class="vr mx-1" style="border-color:#30363d"></div>
+
+      <span class="text-white-50 small">Color</span>
+      <select class="form-select form-select-sm explore-select" @onchange="OnColorByChange">
+        <option value="type">Type</option>
+        <option value="file">Folder</option>
       </select>
-      <button class="btn btn-sm btn-outline-light" @onclick="@(async () => { _hovered = null; await Reproject(); })" disabled="@_projecting">Reproject</button>
+      <button class="btn btn-sm explore-btn" @onclick="@(async () => { _hovered = null; _queryPoint = null; _searchQuery = ""; await Reproject(); })">Reproject</button>
     </div>
   </div>
 
-  <!-- Main split -->
+  <!-- Body -->
   <div class="explore-body">
 
-    <!-- Canvas -->
     <div class="explore-canvas-wrap" id="canvasWrap">
-      <canvas id="vizCanvas" @ref="_canvas"></canvas>
       @if (_points.Count == 0 && !_projecting)
       {
         <div class="explore-empty">
-          <div class="text-muted">No vectors indexed yet.</div>
+          <div style="font-size:2rem;color:#30363d">⬡</div>
+          <div class="text-muted mt-2">No vectors indexed yet.</div>
           <a href="/" class="btn btn-sm btn-outline-secondary mt-2">Go to Dashboard</a>
         </div>
       }
@@ -46,53 +62,95 @@
     <!-- Sidebar -->
     <div class="explore-sidebar">
 
-      <!-- Stats -->
       <div class="explore-section">
-        <div class="explore-section-title">Index stats</div>
+        <div class="explore-section-title">Index</div>
         <div class="stat-row"><span>Live vectors</span><strong>@Vectors.LiveEntries</strong></div>
         <div class="stat-row"><span>Lucene chunks</span><strong>@Lucene.DocumentCount</strong></div>
         <div class="stat-row"><span>Dimensions</span><strong>@Vectors.Dimensions</strong></div>
-        <div class="stat-row"><span>Chunk types</span><strong>@_typeCounts.Count</strong></div>
+        <div class="stat-row"><span>Embedding model</span><strong style="font-size:0.7rem">@Embeddings.Model</strong></div>
       </div>
 
-      <!-- Legend -->
+      @if (_queryPoint != null)
+      {
+        <div class="explore-section" style="border-left:3px solid #58a6ff">
+          <div class="explore-section-title" style="color:#58a6ff">Query overlay</div>
+          <div class="detail-symbol" style="color:#58a6ff">@_searchQuery</div>
+          <div class="text-muted small mt-1">Showing cosine similarity rings</div>
+          <button class="btn btn-sm mt-2" style="background:#21262d;color:#8b949e;font-size:0.72rem"
+                  @onclick="ClearQueryOverlay">
+            Clear overlay
+          </button>
+        </div>
+      }
+
       @if (_legend.Count > 0)
       {
         <div class="explore-section">
-          <div class="explore-section-title">Legend</div>
+          <div class="explore-section-title">Legend <span class="text-muted fw-normal">(click to toggle)</span></div>
           @foreach (var (label, color, count) in _legend)
           {
-            <div class="legend-row" @onclick="() => ToggleFilter(label)" style="cursor:pointer">
-              <span class="legend-dot" style="background:@color;opacity:@(_hiddenLabels.Contains(label) ? 0.25 : 1)"></span>
-              <span class="@(_hiddenLabels.Contains(label) ? "text-muted" : "")">@label</span>
-              <span class="ms-auto badge bg-dark">@count</span>
+            <div class="legend-row" @onclick="() => ToggleFilter(label)">
+              <span class="legend-dot" style="background:@color;opacity:@(_hiddenLabels.Contains(label) ? 0.2 : 1)"></span>
+              <span style="opacity:@(_hiddenLabels.Contains(label) ? 0.4 : 1)">@label</span>
+              <span class="ms-auto" style="color:#484f58;font-size:0.72rem">@count</span>
             </div>
           }
         </div>
       }
 
-      <!-- Hovered point detail -->
+      @if (_pinned != null)
+      {
+        <div class="hover-card pinned-card">
+          <div class="hover-card-header">
+            <span style="font-size:0.65rem;color:#f0883e;letter-spacing:0.06em;text-transform:uppercase;font-weight:700">📌 Pinned</span>
+            <span class="hover-type-badge ms-1" style="background:@LabelColor(_pinned.ChunkType)20;color:@LabelColor(_pinned.ChunkType);border:1px solid @LabelColor(_pinned.ChunkType)55">@_pinned.ChunkType</span>
+            <span class="hover-lines">@_pinned.StartLine–@_pinned.EndLine</span>
+            @if (_pinnedSim.HasValue)
+            {
+              <span class="hover-sim">cos @_pinnedSim.Value.ToString("F3")</span>
+            }
+            <button class="ms-auto btn-unpin" @onclick="() => { _pinned = null; _pinnedSim = null; }">✕</button>
+          </div>
+          @if (!string.IsNullOrEmpty(_pinned.Symbol))
+          {
+            <div class="hover-symbol">@_pinned.Symbol</div>
+          }
+          <div class="hover-path">@_pinned.RelativePath</div>
+          <pre class="hover-preview">@TrimContent(_pinned.Content, 18)</pre>
+        </div>
+      }
+
       @if (_hovered != null)
       {
-        <div class="explore-section explore-detail">
-          <div class="explore-section-title">Hovered chunk</div>
-          <div class="d-flex align-items-center gap-2 mb-2">
-            <span class="badge" style="background:@ChunkColor(_hovered.ChunkType)">@_hovered.ChunkType</span>
-            <span class="detail-lines text-muted" style="font-size:0.7rem">@_hovered.StartLine–@_hovered.EndLine</span>
+        <div class="hover-card">
+          <div class="hover-card-header">
+            <span class="hover-type-badge" style="background:@LabelColor(_hovered.ChunkType)20;color:@LabelColor(_hovered.ChunkType);border:1px solid @LabelColor(_hovered.ChunkType)55">
+              @_hovered.ChunkType
+            </span>
+            <span class="hover-lines">@_hovered.StartLine–@_hovered.EndLine</span>
+            @if (_hoveredSim.HasValue)
+            {
+              var simPct = (int)(_hoveredSim.Value * 100);
+              <span class="hover-sim" style="--sim-pct:@simPct%">cos @_hoveredSim.Value.ToString("F3")</span>
+            }
           </div>
           @if (!string.IsNullOrEmpty(_hovered.Symbol))
           {
-            <div class="detail-symbol">@_hovered.Symbol</div>
+            <div class="hover-symbol">@_hovered.Symbol</div>
           }
-          <div class="detail-path font-monospace mt-1">@_hovered.RelativePath</div>
-          <pre class="detail-preview mt-2">@TrimContent(_hovered.Content, 15)</pre>
+          <div class="hover-path">@_hovered.RelativePath</div>
+          <pre class="hover-preview">@TrimContent(_hovered.Content, 18)</pre>
         </div>
       }
       else
       {
         <div class="explore-section text-center py-4" style="color:#484f58">
-          <div style="font-size:1.5rem">⬡</div>
+          <div style="font-size:1.4rem">⬡</div>
           <div class="small mt-1">Hover a point to inspect</div>
+          @if (_queryPoint == null)
+          {
+            <div class="small mt-2" style="color:#30363d">Type a query above<br/>to see similarity</div>
+          }
         </div>
       }
 
@@ -102,18 +160,25 @@
 </div>
 
 @code {
-    private ElementReference _canvas;
     private DotNetObjectReference<Explore>? _selfRef;
-    private bool _projecting;
+    private bool _projecting, _searching;
     private string _colorBy = "type";
+    private string _searchQuery = "";
 
     private List<PointData> _points = [];
     private List<(string label, string color, int count)> _legend = [];
     private Dictionary<string, int> _typeCounts = [];
     private HashSet<string> _hiddenLabels = [];
     private SearchResult? _hovered;
+    private float? _hoveredSim;
+    private SearchResult? _pinned;
+    private float? _pinnedSim;
+    private (float x, float y, float z)? _queryPoint;
+    private VectorIndexService.PcaSpace? _pcaSpace;
+    private float[]? _queryEmbedding;
+    private Dictionary<string, float[]> _vectorCache = [];
 
-    private record PointData(string Key, float NormX, float NormY, string ChunkType, string RelPath);
+    private record PointData(string Key, float X, float Y, float Z, string ChunkType, string RelPath, string Symbol);
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -126,26 +191,31 @@
     {
         if (Vectors.LiveEntries == 0) return;
         _projecting = true;
+        _queryPoint = null;
+        _queryEmbedding = null;
         StateHasChanged();
-        await Task.Yield(); // let UI update
+        await Task.Yield();
 
         var live    = Vectors.GetAllLive();
         var vectors = live.Select(p => p.Vector).ToList();
-        var proj    = VectorIndexService.ProjectTo2D(vectors);
+        var (proj, space) = VectorIndexService.ProjectTo3D(vectors);
+        _pcaSpace = space;
 
-        // Fetch metadata from Lucene
         var keys    = live.Select(p => (p.Key, 0f)).ToList();
         var results = Lucene.FetchByKeys(keys);
         var byKey   = results.ToDictionary(r => $"{r.FilePath}:{r.StartLine}", r => r);
+
+        _vectorCache = live.ToDictionary(p => p.Key, p => p.Vector);
 
         _points = live.Select((p, i) =>
         {
             byKey.TryGetValue(p.Key, out var meta);
             return new PointData(
                 p.Key,
-                proj[i].x, proj[i].y,
+                proj[i].x, proj[i].y, proj[i].z,
                 meta?.ChunkType ?? "?",
-                meta?.RelativePath ?? p.Key
+                meta?.RelativePath ?? p.Key,
+                meta?.Symbol ?? ""
             );
         }).ToList();
 
@@ -153,7 +223,7 @@
         _projecting = false;
         StateHasChanged();
         await Task.Yield();
-        await DrawCanvas();
+        await DrawScene();
     }
 
     private void BuildLegend()
@@ -176,7 +246,7 @@
                 : p.RelPath)
             : p.ChunkType;
 
-    private async Task DrawCanvas()
+    private async Task DrawScene()
     {
         if (_points.Count == 0) return;
 
@@ -184,41 +254,131 @@
             .Where(p => !_hiddenLabels.Contains(LegendLabel(p)))
             .Select(p => new
             {
-                key   = p.Key,
-                x     = p.NormX,
-                y     = p.NormY,
-                color = LabelColor(LegendLabel(p)),
-                label = LegendLabel(p)
+                key    = p.Key,
+                x      = p.X,
+                y      = p.Y,
+                z      = p.Z,
+                color  = LabelColor(LegendLabel(p)),
+                label  = LegendLabel(p),
+                symbol = p.Symbol,
+                path   = p.RelPath
             })
             .ToArray();
 
-        await JS.InvokeVoidAsync("vizCanvas.draw", "vizCanvas", "canvasWrap", jsPoints, _selfRef);
+        await JS.InvokeVoidAsync("viz3d.init", "canvasWrap", jsPoints, _selfRef);
+    }
+
+    private async Task OnSearchKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await RunQueryOverlay();
+    }
+
+    private async Task RunQueryOverlay()
+    {
+        if (string.IsNullOrWhiteSpace(_searchQuery) || _pcaSpace == null) return;
+        _searching = true;
+        StateHasChanged();
+
+        try
+        {
+            _queryEmbedding = await Embeddings.EmbedAsync(_searchQuery);
+            _queryPoint = VectorIndexService.ProjectOne(_queryEmbedding, _pcaSpace);
+
+            // Embed sim scores directly into the point objects — avoids key-matching issues
+            var jsPointsWithSim = _points
+                .Where(p => !_hiddenLabels.Contains(LegendLabel(p)))
+                .Select(p => new
+                {
+                    key    = p.Key,
+                    x      = p.X,
+                    y      = p.Y,
+                    z      = p.Z,
+                    color  = LabelColor(LegendLabel(p)),
+                    label  = LegendLabel(p),
+                    symbol = p.Symbol,
+                    path   = p.RelPath,
+                    sim    = _vectorCache.TryGetValue(p.Key, out var v) ? CosineSim(_queryEmbedding, v) : 0f
+                })
+                .ToArray();
+
+            await JS.InvokeVoidAsync("viz3d.setQuery",
+                _queryPoint.Value.x, _queryPoint.Value.y, _queryPoint.Value.z,
+                _searchQuery, jsPointsWithSim);
+        }
+        finally
+        {
+            _searching = false;
+            StateHasChanged();
+        }
     }
 
     [JSInvokable]
     public async Task OnHover(string key)
     {
-        if (string.IsNullOrEmpty(key)) { _hovered = null; StateHasChanged(); return; }
+        if (string.IsNullOrEmpty(key))
+        {
+            _hovered = null;
+            _hoveredSim = null;
+            StateHasChanged();
+            return;
+        }
 
         var results = Lucene.FetchByKeys([(key, 0f)]);
         _hovered = results.FirstOrDefault();
+
+        if (_queryEmbedding != null && _hovered != null)
+        {
+            _hoveredSim = _vectorCache.TryGetValue(key, out var vec) && vec.Length > 0
+                ? CosineSim(_queryEmbedding, vec) : null;
+        }
+        else _hoveredSim = null;
+
         StateHasChanged();
         await Task.CompletedTask;
+    }
+
+    [JSInvokable]
+    public async Task OnClick(string key)
+    {
+        if (string.IsNullOrEmpty(key)) return;
+        var results = Lucene.FetchByKeys([(key, 0f)]);
+        _pinned    = results.FirstOrDefault();
+        _pinnedSim = _queryEmbedding != null && _vectorCache.TryGetValue(key, out var vec) && vec.Length > 0
+            ? CosineSim(_queryEmbedding, vec) : null;
+        StateHasChanged();
+        await Task.CompletedTask;
+    }
+
+    private async Task ClearQueryOverlay()
+    {
+        _queryPoint = null;
+        _searchQuery = "";
+        _queryEmbedding = null;
+        await JS.InvokeVoidAsync("viz3d.clearQuery");
+    }
+
+    private static float CosineSim(float[] a, float[] b)
+    {
+        if (a.Length == 0 || b.Length == 0) return 0;
+        int len = Math.Min(a.Length, b.Length);
+        float dot = 0, ma = 0, mb = 0;
+        for (int i = 0; i < len; i++) { dot += a[i]*b[i]; ma += a[i]*a[i]; mb += b[i]*b[i]; }
+        float denom = MathF.Sqrt(ma) * MathF.Sqrt(mb);
+        return denom == 0 ? 0 : dot / denom;
     }
 
     private async Task OnColorByChange(ChangeEventArgs e)
     {
         _colorBy = e.Value?.ToString() ?? "type";
         BuildLegend();
-        await DrawCanvas();
+        await DrawScene();
     }
 
     private async Task ToggleFilter(string label)
     {
         if (!_hiddenLabels.Remove(label)) _hiddenLabels.Add(label);
-        await DrawCanvas();
+        await DrawScene();
     }
-
 
     private static string TrimContent(string c, int maxLines)
     {
@@ -226,9 +386,7 @@
         return lines.Length > maxLines ? string.Join('\n', lines.Take(maxLines)) + "\n…" : c;
     }
 
-    private static string ChunkColor(string type) => LabelColor(type);
-
-    private static string LabelColor(string label) => label switch
+    public static string LabelColor(string label) => label switch
     {
         "class"   => "#4c9be8",
         "method"  => "#56d364",
@@ -244,10 +402,8 @@
 
     private static string StringToColor(string s)
     {
-        // Deterministic hue from string hash
         int hash = s.Aggregate(0, (h, c) => h * 31 + c);
-        int hue  = Math.Abs(hash) % 360;
-        return $"hsl({hue},65%,60%)";
+        return $"hsl({Math.Abs(hash) % 360},65%,60%)";
     }
 
     public void Dispose() => _selfRef?.Dispose();
