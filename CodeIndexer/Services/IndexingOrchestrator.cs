@@ -12,6 +12,7 @@ public class IndexingOrchestrator : BackgroundService
     private readonly ILogger<IndexingOrchestrator> _logger;
     private readonly HashSet<string> _extensions;
     private readonly HashSet<string> _excludeFolders;
+    private readonly HashSet<string> _excludeFiles;
 
     private FileSystemWatcher? _watcher;
     private readonly System.Collections.Concurrent.ConcurrentQueue<(string path, bool deleted)> _pendingFiles = new();
@@ -41,17 +42,34 @@ public class IndexingOrchestrator : BackgroundService
         _excludeFolders = excl.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(f => f.ToLowerInvariant())
             .ToHashSet();
+
+        var exclFiles = config["Indexer:ExcludeFiles"] ?? "package-lock.json";
+        _excludeFiles = exclFiles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(f => f.ToLowerInvariant())
+            .ToHashSet();
     }
+
+    // Extensions that are inherently binary — skip null-byte check for these
+    private static readonly HashSet<string> BinaryExts = [
+        ".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif"
+    ];
 
     private bool ShouldIndex(string filePath)
     {
         var ext = Path.GetExtension(filePath).ToLowerInvariant();
         if (!_extensions.Contains(ext)) return false;
 
+        var fileName = Path.GetFileName(filePath).ToLowerInvariant();
+        if (_excludeFiles.Contains(fileName)) return false;
+
         var parts = filePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (parts.Any(p => _excludeFolders.Contains(p.ToLowerInvariant()))) return false;
 
-        // Skip binary files by checking for null bytes in the first 8KB
+        // Known binary formats are handled by DocumentCracker — skip null-byte check
+        if (BinaryExts.Contains(ext)) return true;
+
+        // For text-based extensions, reject files that contain null bytes (compiled output, etc.)
         try
         {
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -119,9 +137,23 @@ public class IndexingOrchestrator : BackgroundService
 
     private async Task IndexFileAsync(string filePath, string repoRoot, CancellationToken ct)
     {
+        var rel = Path.GetRelativePath(repoRoot, filePath);
         try
         {
+            _logger.LogInformation("Cracking {File}", rel);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var chunks = await _cracker.CrackAsync(filePath, repoRoot, ct);
+            sw.Stop();
+
+            if (chunks.Count == 0)
+            {
+                _state.AddLog($"Skip (no chunks): {rel}");
+                _state.FileStart(filePath, 0);
+                _state.FileComplete();
+                return;
+            }
+
+            _logger.LogInformation("  → {Count} chunks in {Ms}ms, embedding...", chunks.Count, sw.ElapsedMilliseconds);
             _state.FileStart(filePath, chunks.Count);
 
             var contents = chunks.Select(c => c.Content).ToList();
@@ -135,7 +167,8 @@ public class IndexingOrchestrator : BackgroundService
                 var hint = ex.Message.Contains("404")
                     ? $"Model not found — run: ollama pull {_embeddings.Model}"
                     : ex.Message;
-                _state.AddLog($"Embedding error ({Path.GetFileName(filePath)}): {hint}");
+                _state.AddLog($"Embedding error ({rel}): {hint}");
+                _logger.LogWarning("Embedding failed for {File}: {Hint}", rel, hint);
                 _state.FileComplete();
                 return;
             }

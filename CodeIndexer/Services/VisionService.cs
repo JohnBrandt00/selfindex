@@ -33,7 +33,12 @@ public class VisionService
                 images = new[] { Convert.ToBase64String(imageBytes) },
                 stream = false
             }, ct);
-            resp.EnsureSuccessStatusCode();
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("Vision call returned {Status}: {Body}", (int)resp.StatusCode, body);
+                return null;
+            }
             var result = await resp.Content.ReadFromJsonAsync<GenerateResp>(ct);
             return result?.Response?.Trim() is { Length: > 0 } s ? s : null;
         }

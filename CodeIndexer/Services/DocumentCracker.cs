@@ -2,6 +2,9 @@ using CodeIndexer.Models;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
 using HtmlAgilityPack;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.PixelFormats;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
@@ -28,22 +31,37 @@ public class DocumentCracker(VisionService vision, ILogger<DocumentCracker> logg
         var ext = Path.GetExtension(filePath).ToLowerInvariant();
         var rel = Path.GetRelativePath(repoRoot, filePath);
 
+        var cracker = ext switch
+        {
+            ".pdf"                         => "pdf",
+            ".docx"                        => "docx",
+            ".xlsx"                        => "xlsx",
+            ".pptx"                        => "pptx",
+            ".html" or ".htm"              => "html",
+            _ when ImageExts.Contains(ext) => "image",
+            _                              => "code"
+        };
+        logger.LogDebug("Cracking {File} via {Cracker}", rel, cracker);
+
         try
         {
-            return ext switch
+            var chunks = cracker switch
             {
-                ".pdf"                      => await CrackPdfAsync(filePath, rel, ct),
-                ".docx"                     => await CrackDocxAsync(filePath, rel, ct),
-                ".xlsx"                     => CrackXlsx(filePath, rel),
-                ".pptx"                     => await CrackPptxAsync(filePath, rel, ct),
-                ".html" or ".htm"           => CrackHtml(filePath, rel),
-                _ when ImageExts.Contains(ext) => await CrackImageAsync(filePath, rel, ct),
-                _                           => CodeChunker.Chunk(filePath, repoRoot)
+                "pdf"   => await CrackPdfAsync(filePath, rel, ct),
+                "docx"  => await CrackDocxAsync(filePath, rel, ct),
+                "xlsx"  => CrackXlsx(filePath, rel),
+                "pptx"  => await CrackPptxAsync(filePath, rel, ct),
+                "html"  => CrackHtml(filePath, rel),
+                "image" => await CrackImageAsync(filePath, rel, ct),
+                _       => CodeChunker.Chunk(filePath, repoRoot)
             };
+            logger.LogDebug("  {File}: {Count} chunks", rel, chunks.Count);
+            return chunks;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "DocumentCracker failed for {File}", Path.GetFileName(filePath));
+            logger.LogWarning(ex, "DocumentCracker ({Cracker}) failed for {File}: {Message}",
+                cracker, rel, ex.Message);
             return [];
         }
     }
@@ -61,16 +79,37 @@ public class DocumentCracker(VisionService vision, ILogger<DocumentCracker> logg
 
             var text = ContentOrderTextExtractor.GetText(page).Trim();
 
-            // Try images on the page if there's little or no text (scanned PDF)
-            if (text.Length < 100 && vision.IsConfigured)
+            if (vision.IsConfigured)
             {
-                foreach (var img in page.GetImages())
+                // Describe meaningful images on every page (skip tiny icons: < 64×64)
+                var imgs = page.GetImages()
+                    .Where(i => i.WidthInSamples >= 64 && i.HeightInSamples >= 64)
+                    .Take(5) // cap per-page to avoid runaway cost on image-heavy pages
+                    .ToList();
+
+                if (imgs.Count > 0)
+                    logger.LogDebug("  PDF {Rel} p{Page}: {TextLen} chars, {ImgCount} images",
+                        rel, page.Number, text.Length, imgs.Count);
+
+                foreach (var img in imgs)
                 {
-                    var bytes = TryGetImageBytes(img);
-                    if (bytes is null) continue;
+                    var bytes = TryRenderImageToPng(img);
+                    if (bytes is null)
+                    {
+                        img.TryGetBytesAsMemory(out var dbgMem);
+                        int rawLen = img.RawBytes.ToArray().Length;
+                        logger.LogDebug("    Skipped w={W} h={H} raw={Raw} dec={Dec}",
+                            img.WidthInSamples, img.HeightInSamples, rawLen, dbgMem.Length);
+                        continue;
+                    }
+                    logger.LogDebug("    Sending {Len} bytes PNG to vision (w={W} h={H})",
+                        bytes.Length, img.WidthInSamples, img.HeightInSamples);
                     var desc = await vision.DescribeAsync(bytes, ct);
                     if (desc is not null)
-                        text = string.IsNullOrEmpty(text) ? desc : text + "\n\n" + desc;
+                    {
+                        logger.LogDebug("    Vision returned {Len} chars for p{Page}", desc.Length, page.Number);
+                        text = string.IsNullOrEmpty(text) ? desc : text + "\n\n[Image: " + desc + "]";
+                    }
                 }
             }
 
@@ -91,13 +130,85 @@ public class DocumentCracker(VisionService vision, ILogger<DocumentCracker> logg
         return chunks;
     }
 
-    private static byte[]? TryGetImageBytes(IPdfImage img)
+    // Converts a PdfPig image to a PNG byte array suitable for sending to Ollama vision.
+    // Handles three cases in order of preference:
+    //   1. PdfPig can export a direct PNG (embedded JPEG/PNG that decoded cleanly)
+    //   2. Raw bytes are a recognised image format ImageSharp can load (JPEG with CMYK, etc.)
+    //   3. Raw bytes are headerless raw RGB pixels — reconstruct using PdfPig dimension metadata
+    private static byte[]? TryRenderImageToPng(IPdfImage img)
     {
         try
         {
-            if (img.TryGetPng(out var png) && png is { Length: > 1024 }) return png;
+            // Case 1: PdfPig already gives us a valid PNG
+            if (img.TryGetPng(out var directPng) && directPng is { Length: > 1024 })
+                return directPng;
+
             var raw = img.RawBytes.ToArray();
-            return raw.Length > 1024 ? raw : null;
+            if (raw.Length < 100) return null;
+
+            // Case 2: raw bytes are a self-describing format (JPEG, GIF, etc.)
+            var decoded = NormalizeToPng(raw);
+            if (decoded is not null) return decoded;
+
+            // Case 3: try decoded (filter-decompressed) bytes — PdfPig applies FlateDecode/etc.
+            byte[]? decompressed = null;
+            if (img.TryGetBytesAsMemory(out var mem))
+                decompressed = mem.ToArray();
+
+            if (decompressed is { Length: > 100 })
+            {
+                var fromDecompressed = NormalizeToPng(decompressed);
+                if (fromDecompressed is not null) return fromDecompressed;
+            }
+
+            // Case 4: headerless uncompressed pixels — reconstruct using PdfPig dimension metadata
+            var pixels = decompressed ?? raw;
+            int w = img.WidthInSamples;
+            int h = img.HeightInSamples;
+            if (w <= 0 || h <= 0) return null;
+
+            // 24-bit RGB (3 bytes/pixel) is the most common case for DeviceRGB images from PdfPig
+            if (pixels.Length == w * h * 3)
+            {
+                using var bitmap = SixLabors.ImageSharp.Image.LoadPixelData<Rgb24>(pixels, w, h);
+                using var ms = new MemoryStream();
+                bitmap.Save(ms, new PngEncoder());
+                return ms.ToArray();
+            }
+
+            // 8-bit grayscale (1 byte/pixel)
+            if (pixels.Length == w * h)
+            {
+                using var bitmap = SixLabors.ImageSharp.Image.LoadPixelData<L8>(pixels, w, h);
+                using var ms = new MemoryStream();
+                bitmap.Save(ms, new PngEncoder());
+                return ms.ToArray();
+            }
+
+            // 32-bit RGBA
+            if (pixels.Length == w * h * 4)
+            {
+                using var bitmap = SixLabors.ImageSharp.Image.LoadPixelData<Rgba32>(pixels, w, h);
+                using var ms = new MemoryStream();
+                bitmap.Save(ms, new PngEncoder());
+                return ms.ToArray();
+            }
+
+            return null;
+        }
+        catch { return null; }
+    }
+
+    // Re-encode anything ImageSharp can load (JPEG, GIF, BMP, WebP…) into a clean sRGB PNG.
+    // Returns null if the bytes are not a recognised self-describing image format.
+    private static byte[]? NormalizeToPng(byte[] input)
+    {
+        try
+        {
+            using var img = SixLabors.ImageSharp.Image.Load(input);
+            using var ms  = new MemoryStream();
+            img.Save(ms, new PngEncoder());
+            return ms.ToArray();
         }
         catch { return null; }
     }
@@ -330,7 +441,8 @@ public class DocumentCracker(VisionService vision, ILogger<DocumentCracker> logg
     {
         if (!vision.IsConfigured) return [];
 
-        var bytes = await File.ReadAllBytesAsync(filePath, ct);
+        var raw   = await File.ReadAllBytesAsync(filePath, ct);
+        var bytes = NormalizeToPng(raw) ?? raw;
         var desc  = await vision.DescribeAsync(bytes, ct);
         if (desc is null) return [];
 

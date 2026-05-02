@@ -1,0 +1,254 @@
+@page "/explore"
+@using CodeIndexer.Services
+@using CodeIndexer.Models
+@inject VectorIndexService Vectors
+@inject LuceneIndexService Lucene
+@inject IJSRuntime JS
+@implements IDisposable
+
+<div class="explore-layout">
+
+  <!-- Toolbar -->
+  <div class="explore-toolbar d-flex align-items-center gap-3 px-3 py-2">
+    <span class="fw-semibold">Embedding Explorer</span>
+    <span class="badge bg-secondary">@_points.Count vectors</span>
+    <span class="badge bg-dark">@Vectors.Dimensions d</span>
+    @if (_projecting)
+    {
+      <span class="spinner-border spinner-border-sm text-light"></span>
+      <span class="text-white-50 small">Projecting…</span>
+    }
+    <div class="ms-auto d-flex gap-2 align-items-center">
+      <span class="text-white-50 small">Color by</span>
+      <select class="form-select form-select-sm" style="width:120px" @onchange="OnColorByChange">
+        <option value="type">Chunk type</option>
+        <option value="file">File</option>
+      </select>
+      <button class="btn btn-sm btn-outline-light" @onclick="@(async () => { _hovered = null; await Reproject(); })" disabled="@_projecting">Reproject</button>
+    </div>
+  </div>
+
+  <!-- Main split -->
+  <div class="explore-body">
+
+    <!-- Canvas -->
+    <div class="explore-canvas-wrap" id="canvasWrap">
+      <canvas id="vizCanvas" @ref="_canvas"></canvas>
+      @if (_points.Count == 0 && !_projecting)
+      {
+        <div class="explore-empty">
+          <div class="text-muted">No vectors indexed yet.</div>
+          <a href="/" class="btn btn-sm btn-outline-secondary mt-2">Go to Dashboard</a>
+        </div>
+      }
+    </div>
+
+    <!-- Sidebar -->
+    <div class="explore-sidebar">
+
+      <!-- Stats -->
+      <div class="explore-section">
+        <div class="explore-section-title">Index stats</div>
+        <div class="stat-row"><span>Live vectors</span><strong>@Vectors.LiveEntries</strong></div>
+        <div class="stat-row"><span>Lucene chunks</span><strong>@Lucene.DocumentCount</strong></div>
+        <div class="stat-row"><span>Dimensions</span><strong>@Vectors.Dimensions</strong></div>
+        <div class="stat-row"><span>Chunk types</span><strong>@_typeCounts.Count</strong></div>
+      </div>
+
+      <!-- Legend -->
+      @if (_legend.Count > 0)
+      {
+        <div class="explore-section">
+          <div class="explore-section-title">Legend</div>
+          @foreach (var (label, color, count) in _legend)
+          {
+            <div class="legend-row" @onclick="() => ToggleFilter(label)" style="cursor:pointer">
+              <span class="legend-dot" style="background:@color;opacity:@(_hiddenLabels.Contains(label) ? 0.25 : 1)"></span>
+              <span class="@(_hiddenLabels.Contains(label) ? "text-muted" : "")">@label</span>
+              <span class="ms-auto badge bg-dark">@count</span>
+            </div>
+          }
+        </div>
+      }
+
+      <!-- Hovered point detail -->
+      @if (_hovered != null)
+      {
+        <div class="explore-section explore-detail">
+          <div class="explore-section-title">Hovered chunk</div>
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <span class="badge" style="background:@ChunkColor(_hovered.ChunkType)">@_hovered.ChunkType</span>
+            <span class="detail-lines text-muted" style="font-size:0.7rem">@_hovered.StartLine–@_hovered.EndLine</span>
+          </div>
+          @if (!string.IsNullOrEmpty(_hovered.Symbol))
+          {
+            <div class="detail-symbol">@_hovered.Symbol</div>
+          }
+          <div class="detail-path font-monospace mt-1">@_hovered.RelativePath</div>
+          <pre class="detail-preview mt-2">@TrimContent(_hovered.Content, 15)</pre>
+        </div>
+      }
+      else
+      {
+        <div class="explore-section text-center py-4" style="color:#484f58">
+          <div style="font-size:1.5rem">⬡</div>
+          <div class="small mt-1">Hover a point to inspect</div>
+        </div>
+      }
+
+    </div>
+  </div>
+
+</div>
+
+@code {
+    private ElementReference _canvas;
+    private DotNetObjectReference<Explore>? _selfRef;
+    private bool _projecting;
+    private string _colorBy = "type";
+
+    private List<PointData> _points = [];
+    private List<(string label, string color, int count)> _legend = [];
+    private Dictionary<string, int> _typeCounts = [];
+    private HashSet<string> _hiddenLabels = [];
+    private SearchResult? _hovered;
+
+    private record PointData(string Key, float NormX, float NormY, string ChunkType, string RelPath);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        _selfRef = DotNetObjectReference.Create(this);
+        await Reproject();
+    }
+
+    private async Task Reproject()
+    {
+        if (Vectors.LiveEntries == 0) return;
+        _projecting = true;
+        StateHasChanged();
+        await Task.Yield(); // let UI update
+
+        var live    = Vectors.GetAllLive();
+        var vectors = live.Select(p => p.Vector).ToList();
+        var proj    = VectorIndexService.ProjectTo2D(vectors);
+
+        // Fetch metadata from Lucene
+        var keys    = live.Select(p => (p.Key, 0f)).ToList();
+        var results = Lucene.FetchByKeys(keys);
+        var byKey   = results.ToDictionary(r => $"{r.FilePath}:{r.StartLine}", r => r);
+
+        _points = live.Select((p, i) =>
+        {
+            byKey.TryGetValue(p.Key, out var meta);
+            return new PointData(
+                p.Key,
+                proj[i].x, proj[i].y,
+                meta?.ChunkType ?? "?",
+                meta?.RelativePath ?? p.Key
+            );
+        }).ToList();
+
+        BuildLegend();
+        _projecting = false;
+        StateHasChanged();
+        await Task.Yield();
+        await DrawCanvas();
+    }
+
+    private void BuildLegend()
+    {
+        _typeCounts = _points
+            .GroupBy(p => LegendLabel(p))
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        _legend = _typeCounts
+            .OrderByDescending(kv => kv.Value)
+            .Take(20)
+            .Select(kv => (kv.Key, LabelColor(kv.Key), kv.Value))
+            .ToList();
+    }
+
+    private string LegendLabel(PointData p) =>
+        _colorBy == "file"
+            ? (p.RelPath.Contains('/') || p.RelPath.Contains('\\')
+                ? p.RelPath.Split('/', '\\')[0]
+                : p.RelPath)
+            : p.ChunkType;
+
+    private async Task DrawCanvas()
+    {
+        if (_points.Count == 0) return;
+
+        var jsPoints = _points
+            .Where(p => !_hiddenLabels.Contains(LegendLabel(p)))
+            .Select(p => new
+            {
+                key   = p.Key,
+                x     = p.NormX,
+                y     = p.NormY,
+                color = LabelColor(LegendLabel(p)),
+                label = LegendLabel(p)
+            })
+            .ToArray();
+
+        await JS.InvokeVoidAsync("vizCanvas.draw", "vizCanvas", "canvasWrap", jsPoints, _selfRef);
+    }
+
+    [JSInvokable]
+    public async Task OnHover(string key)
+    {
+        if (string.IsNullOrEmpty(key)) { _hovered = null; StateHasChanged(); return; }
+
+        var results = Lucene.FetchByKeys([(key, 0f)]);
+        _hovered = results.FirstOrDefault();
+        StateHasChanged();
+        await Task.CompletedTask;
+    }
+
+    private async Task OnColorByChange(ChangeEventArgs e)
+    {
+        _colorBy = e.Value?.ToString() ?? "type";
+        BuildLegend();
+        await DrawCanvas();
+    }
+
+    private async Task ToggleFilter(string label)
+    {
+        if (!_hiddenLabels.Remove(label)) _hiddenLabels.Add(label);
+        await DrawCanvas();
+    }
+
+
+    private static string TrimContent(string c, int maxLines)
+    {
+        var lines = c.Split('\n');
+        return lines.Length > maxLines ? string.Join('\n', lines.Take(maxLines)) + "\n…" : c;
+    }
+
+    private static string ChunkColor(string type) => LabelColor(type);
+
+    private static string LabelColor(string label) => label switch
+    {
+        "class"   => "#4c9be8",
+        "method"  => "#56d364",
+        "file"    => "#8b949e",
+        "page"    => "#f78166",
+        "slide"   => "#ffa657",
+        "sheet"   => "#3fb950",
+        "section" => "#79c0ff",
+        "image"   => "#d2a8ff",
+        "block"   => "#6e7681",
+        _         => StringToColor(label)
+    };
+
+    private static string StringToColor(string s)
+    {
+        // Deterministic hue from string hash
+        int hash = s.Aggregate(0, (h, c) => h * 31 + c);
+        int hue  = Math.Abs(hash) % 360;
+        return $"hsl({hue},65%,60%)";
+    }
+
+    public void Dispose() => _selfRef?.Dispose();
+}

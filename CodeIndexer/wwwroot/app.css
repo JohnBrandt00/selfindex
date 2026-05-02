@@ -43,3 +43,145 @@ html, body {
     font-size: 1.1rem;
     letter-spacing: 0.05em;
 }
+
+/* ── Embedding Explorer ───────────────────────────────────── */
+
+.explore-layout {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 56px);
+    margin: -1rem;
+    overflow: hidden;
+    background: #0d1117;
+    color: #e6edf3;
+}
+
+.explore-toolbar {
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+    flex-shrink: 0;
+    height: 48px;
+    color: #e6edf3;
+}
+
+.explore-toolbar .form-select {
+    background: #21262d;
+    color: #e6edf3;
+    border-color: #30363d;
+}
+
+.explore-toolbar .btn-outline-light {
+    border-color: #30363d;
+    color: #8b949e;
+    font-size: 0.75rem;
+    padding: 2px 10px;
+}
+.explore-toolbar .btn-outline-light:hover { background: #21262d; color: #e6edf3; }
+
+.explore-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+.explore-canvas-wrap {
+    flex: 1;
+    position: relative;
+    min-width: 0;
+}
+
+.explore-canvas-wrap canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.explore-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.explore-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    background: #161b22;
+    border-left: 1px solid #30363d;
+    overflow-y: auto;
+    font-size: 0.82rem;
+}
+
+.explore-section {
+    padding: 12px 14px;
+    border-bottom: 1px solid #21262d;
+}
+
+.explore-section-title {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #8b949e;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    color: #8b949e;
+}
+.stat-row strong { color: #e6edf3; }
+
+.legend-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 0;
+    color: #c9d1d9;
+    transition: opacity 0.15s;
+}
+.legend-row:hover { color: #fff; }
+.legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: opacity 0.15s;
+}
+
+.explore-detail {}
+
+.detail-symbol {
+    font-weight: 600;
+    color: #e6edf3;
+    font-size: 0.88rem;
+    word-break: break-all;
+}
+
+.detail-path {
+    font-size: 0.72rem;
+    word-break: break-all;
+    line-height: 1.3;
+}
+
+.detail-lines {
+    font-size: 0.72rem;
+}
+
+.detail-preview {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 0.7rem;
+    color: #8b949e;
+    max-height: 160px;
+    overflow: auto;
+    white-space: pre;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    line-height: 1.4;
+}

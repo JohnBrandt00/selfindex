@@ -45,6 +45,146 @@ public sealed class VectorIndexService : IDisposable
     public int LiveEntries  => _vectors.Count - _tombstones.Count;
     public int TotalEntries => _vectors.Count;
 
+    public record VizPoint(string Key, float[] Vector, int Index);
+
+    /// <summary>Returns all live vectors with their keys for visualization.</summary>
+    public List<VizPoint> GetAllLive()
+    {
+        _rwLock.EnterReadLock();
+        try
+        {
+            var result = new List<VizPoint>(_vectors.Count - _tombstones.Count);
+            for (int i = 0; i < _vectors.Count; i++)
+            {
+                if (_tombstones.Contains(i)) continue;
+                result.Add(new VizPoint(_keys[i], _vectors[i], i));
+            }
+            return result;
+        }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
+    /// <summary>Project high-dim vectors to 3D via PCA (top 3 principal components).
+    /// Returns normalized [0,1] coordinates.</summary>
+    public static (float x, float y, float z)[] ProjectTo3D(List<float[]> vectors)
+    {
+        if (vectors.Count == 0) return [];
+        int n    = vectors.Count;
+        int dims = vectors[0].Length;
+
+        var mean = new float[dims];
+        foreach (var v in vectors) for (int d = 0; d < dims; d++) mean[d] += v[d] / n;
+
+        var centred = vectors.Select(v =>
+        {
+            var c = new float[dims];
+            for (int d = 0; d < dims; d++) c[d] = v[d] - mean[d];
+            return c;
+        }).ToArray();
+
+        var pc1 = PowerIterate(centred, dims, seed: 42);
+        var pc2 = PowerIterate(centred, dims, seed: 137, orthogonalTo: pc1);
+        var pc3 = PowerIterate(centred, dims, seed: 251, orthogonalTo: pc1, orthogonalTo2: pc2);
+
+        var proj = new (float x, float y, float z)[n];
+        for (int i = 0; i < n; i++)
+            proj[i] = (Dot(centred[i], pc1), Dot(centred[i], pc2), Dot(centred[i], pc3));
+
+        float minX = proj.Min(p => p.x), maxX = proj.Max(p => p.x);
+        float minY = proj.Min(p => p.y), maxY = proj.Max(p => p.y);
+        float minZ = proj.Min(p => p.z), maxZ = proj.Max(p => p.z);
+        float rngX = maxX - minX, rngY = maxY - minY, rngZ = maxZ - minZ;
+        if (rngX == 0) rngX = 1; if (rngY == 0) rngY = 1; if (rngZ == 0) rngZ = 1;
+
+        for (int i = 0; i < n; i++)
+            proj[i] = (
+                (proj[i].x - minX) / rngX * 2 - 1,
+                (proj[i].y - minY) / rngY * 2 - 1,
+                (proj[i].z - minZ) / rngZ * 2 - 1
+            );
+
+        return proj;
+    }
+
+    /// <summary>Project high-dim vectors to 2D via PCA (top 2 principal components).
+    /// Returns normalized [0,1] coordinates.</summary>
+    public static (float x, float y)[] ProjectTo2D(List<float[]> vectors)
+    {
+        if (vectors.Count == 0) return [];
+        int n    = vectors.Count;
+        int dims = vectors[0].Length;
+
+        // Centre the data
+        var mean = new float[dims];
+        foreach (var v in vectors) for (int d = 0; d < dims; d++) mean[d] += v[d] / n;
+
+        var centred = vectors.Select(v =>
+        {
+            var c = new float[dims];
+            for (int d = 0; d < dims; d++) c[d] = v[d] - mean[d];
+            return c;
+        }).ToArray();
+
+        // Power iteration for first two principal components
+        var pc1 = PowerIterate(centred, dims, seed: 42);
+        var pc2 = PowerIterate(centred, dims, seed: 137, orthogonalTo: pc1);
+
+        // Project
+        var proj = new (float x, float y)[n];
+        for (int i = 0; i < n; i++)
+            proj[i] = (Dot(centred[i], pc1), Dot(centred[i], pc2));
+
+        // Normalize to [0,1]
+        float minX = proj.Min(p => p.x), maxX = proj.Max(p => p.x);
+        float minY = proj.Min(p => p.y), maxY = proj.Max(p => p.y);
+        float rngX = maxX - minX, rngY = maxY - minY;
+        if (rngX == 0) rngX = 1; if (rngY == 0) rngY = 1;
+
+        for (int i = 0; i < n; i++)
+            proj[i] = ((proj[i].x - minX) / rngX, (proj[i].y - minY) / rngY);
+
+        return proj;
+    }
+
+    private static float[] PowerIterate(float[][] data, int dims, int seed, float[]? orthogonalTo = null)
+    {
+        var rng = new Random(seed);
+        var v = new float[dims];
+        for (int d = 0; d < dims; d++) v[d] = (float)(rng.NextDouble() - 0.5);
+        Normalize(v);
+
+        for (int iter = 0; iter < 30; iter++)
+        {
+            var next = new float[dims];
+            foreach (var row in data)
+            {
+                float proj = Dot(row, v);
+                for (int d = 0; d < dims; d++) next[d] += proj * row[d];
+            }
+            if (orthogonalTo is not null)
+            {
+                float proj = Dot(next, orthogonalTo);
+                for (int d = 0; d < dims; d++) next[d] -= proj * orthogonalTo[d];
+            }
+            Normalize(next);
+            v = next;
+        }
+        return v;
+    }
+
+    private static float Dot(float[] a, float[] b)
+    {
+        float s = 0;
+        for (int i = 0; i < Math.Min(a.Length, b.Length); i++) s += a[i] * b[i];
+        return s;
+    }
+
+    private static void Normalize(float[] v)
+    {
+        float mag = MathF.Sqrt(v.Sum(x => x * x));
+        if (mag > 0) for (int i = 0; i < v.Length; i++) v[i] /= mag;
+    }
+
     public VectorIndexService(IConfiguration config, ILogger<VectorIndexService> logger)
     {
         _logger = logger;
