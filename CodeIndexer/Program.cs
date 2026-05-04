@@ -1,4 +1,5 @@
 using CodeIndexer.Services;
+using CodeIndexer.Services.Enrichers;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,6 +22,13 @@ builder.Services.AddSingleton<IndexingState>();
 builder.Services.AddSingleton<IndexingOrchestrator>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IndexingOrchestrator>());
 
+// Metadata enrichers — register only those enabled in config
+var cfg = builder.Configuration;
+if (cfg.GetValue<bool>("Enrichers:Md5",         true)) builder.Services.AddSingleton<IMetadataEnricher, Md5Enricher>();
+if (cfg.GetValue<bool>("Enrichers:LastModified", true)) builder.Services.AddSingleton<IMetadataEnricher, LastModifiedEnricher>();
+if (cfg.GetValue<bool>("Enrichers:FileSize",     true)) builder.Services.AddSingleton<IMetadataEnricher, FileSizeEnricher>();
+if (cfg.GetValue<bool>("Enrichers:Language",     true)) builder.Services.AddSingleton<IMetadataEnricher, LanguageEnricher>();
+
 // CodeSearchTools is both an MCP tool class and injectable in Blazor pages
 builder.Services.AddSingleton<CodeSearchTools>();
 
@@ -37,7 +45,6 @@ if (!app.Environment.IsDevelopment())
 app.UseStaticFiles();
 app.UseAntiforgery();
 
-// MCP endpoint — AI agents connect here
 app.MapMcp("/mcp");
 
 app.MapRazorComponents<CodeIndexer.Components.App>()

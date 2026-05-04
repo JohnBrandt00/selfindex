@@ -1,4 +1,5 @@
 using CodeIndexer.Models;
+using CodeIndexer.Services.Enrichers;
 
 namespace CodeIndexer.Services;
 
@@ -8,6 +9,7 @@ public class IndexingOrchestrator : BackgroundService
     private readonly LuceneIndexService _lucene;
     private readonly VectorIndexService _vectors;
     private readonly DocumentCracker _cracker;
+    private readonly IEnumerable<IMetadataEnricher> _enrichers;
     private readonly IndexingState _state;
     private readonly ILogger<IndexingOrchestrator> _logger;
     private readonly HashSet<string> _extensions;
@@ -22,6 +24,7 @@ public class IndexingOrchestrator : BackgroundService
         LuceneIndexService lucene,
         VectorIndexService vectors,
         DocumentCracker cracker,
+        IEnumerable<IMetadataEnricher> enrichers,
         IndexingState state,
         IConfiguration config,
         ILogger<IndexingOrchestrator> logger)
@@ -30,6 +33,7 @@ public class IndexingOrchestrator : BackgroundService
         _lucene = lucene;
         _vectors = vectors;
         _cracker = cracker;
+        _enrichers = enrichers;
         _state = state;
         _logger = logger;
 
@@ -49,7 +53,6 @@ public class IndexingOrchestrator : BackgroundService
             .ToHashSet();
     }
 
-    // Extensions that are inherently binary — skip null-byte check for these
     private static readonly HashSet<string> BinaryExts = [
         ".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt",
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif"
@@ -66,10 +69,8 @@ public class IndexingOrchestrator : BackgroundService
         var parts = filePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (parts.Any(p => _excludeFolders.Contains(p.ToLowerInvariant()))) return false;
 
-        // Known binary formats are handled by DocumentCracker — skip null-byte check
         if (BinaryExts.Contains(ext)) return true;
 
-        // For text-based extensions, reject files that contain null bytes (compiled output, etc.)
         try
         {
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -124,15 +125,42 @@ public class IndexingOrchestrator : BackgroundService
         _state.StartIndexing(files.Count);
         _state.AddLog($"Found {files.Count} files to index.");
 
+        int skipped = 0;
         foreach (var file in files)
         {
             if (ct.IsCancellationRequested) break;
+
+            // Skip files whose md5 hasn't changed since last index
+            if (IsUnchanged(file))
+            {
+                skipped++;
+                _state.FileStart(file, 0);
+                _state.FileComplete();
+                continue;
+            }
+
             await IndexFileAsync(file, repoPath, ct);
         }
+
+        if (skipped > 0)
+            _state.AddLog($"Skipped {skipped} unchanged files.");
 
         _lucene.Commit();
         _vectors.Save();
         _state.FinishIndexing();
+    }
+
+    private bool IsUnchanged(string filePath)
+    {
+        try
+        {
+            var storedMd5 = _lucene.GetStoredMd5(filePath);
+            if (storedMd5 == null) return false;
+            using var md5 = System.Security.Cryptography.MD5.Create();
+            var hash = Convert.ToHexString(md5.ComputeHash(File.ReadAllBytes(filePath))).ToLowerInvariant();
+            return hash == storedMd5;
+        }
+        catch { return false; }
     }
 
     private async Task IndexFileAsync(string filePath, string repoRoot, CancellationToken ct)
@@ -156,6 +184,26 @@ public class IndexingOrchestrator : BackgroundService
             _logger.LogInformation("  → {Count} chunks in {Ms}ms, embedding...", chunks.Count, sw.ElapsedMilliseconds);
             _state.FileStart(filePath, chunks.Count);
 
+            // Run enrichers once per file — results stored in Lucene document fields
+            var enrichedMeta = new Dictionary<string, object>
+            {
+                ["file_path"]     = filePath,
+                ["relative_path"] = rel,
+                ["file_name"]     = Path.GetFileName(filePath),
+            };
+            foreach (var enricher in _enrichers)
+            {
+                try
+                {
+                    var extra = await enricher.EnrichAsync(filePath, "", ct);
+                    foreach (var (k, v) in extra) enrichedMeta[k] = v;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Enricher {Name} failed for {File}: {Msg}", enricher.Name, rel, ex.Message);
+                }
+            }
+
             var contents = chunks.Select(c => c.Content).ToList();
             float[][] embeddings;
             try
@@ -176,7 +224,7 @@ public class IndexingOrchestrator : BackgroundService
             for (int i = 0; i < chunks.Count; i++)
             {
                 chunks[i].Embedding = i < embeddings.Length ? embeddings[i] : null;
-                _lucene.Upsert(chunks[i]);
+                _lucene.Upsert(chunks[i], enrichedMeta);
 
                 if (chunks[i].Embedding is { Length: > 0 } vec)
                 {
@@ -194,6 +242,15 @@ public class IndexingOrchestrator : BackgroundService
             _logger.LogError(ex, "Error indexing {File}", filePath);
             _state.AddLog($"Error: {Path.GetFileName(filePath)}: {ex.Message}");
         }
+    }
+
+    public async Task ReindexFileAsync(string filePath, CancellationToken ct = default)
+    {
+        _lucene.DeleteByPath(filePath);
+        _vectors.DeleteByFilePath(filePath);
+        await IndexFileAsync(filePath, _state.WatchPath, ct);
+        _lucene.Commit();
+        _vectors.Save();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

@@ -248,6 +248,7 @@ public sealed class VectorIndexService : IDisposable
                     _tombstones.Add(i);
         }
         finally { _rwLock.ExitWriteLock(); }
+
     }
 
     public List<(string key, float score)> Search(float[] query, int topN)

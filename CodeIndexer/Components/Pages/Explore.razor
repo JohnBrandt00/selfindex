@@ -40,6 +40,7 @@
       <select class="form-select form-select-sm explore-select" @onchange="OnColorByChange">
         <option value="type">Type</option>
         <option value="file">Folder</option>
+        <option value="language">Language</option>
       </select>
       <button class="btn btn-sm explore-btn" @onclick="@(async () => { _hovered = null; _queryPoint = null; _searchQuery = ""; await Reproject(); })">Reproject</button>
     </div>
@@ -139,6 +140,24 @@
             <div class="hover-symbol">@_hovered.Symbol</div>
           }
           <div class="hover-path">@_hovered.RelativePath</div>
+          <div class="hover-payload">
+            @if (!string.IsNullOrEmpty(_hovered.Language))
+            {
+              <span class="payload-tag"><span class="payload-key">lang</span> @_hovered.Language</span>
+            }
+            @if (!string.IsNullOrEmpty(_hovered.FileSize))
+            {
+              <span class="payload-tag"><span class="payload-key">size</span> @FormatBytes(_hovered.FileSize)</span>
+            }
+            @if (!string.IsNullOrEmpty(_hovered.LastModified))
+            {
+              <span class="payload-tag"><span class="payload-key">modified</span> @FormatDate(_hovered.LastModified)</span>
+            }
+            @if (!string.IsNullOrEmpty(_hovered.Md5))
+            {
+              <span class="payload-tag" title="@_hovered.Md5"><span class="payload-key">md5</span> @(_hovered.Md5[..8] + "...")</span>
+            }
+          </div>
           <pre class="hover-preview">@TrimContent(_hovered.Content, 18)</pre>
         </div>
       }
@@ -178,7 +197,8 @@
     private float[]? _queryEmbedding;
     private Dictionary<string, float[]> _vectorCache = [];
 
-    private record PointData(string Key, float X, float Y, float Z, string ChunkType, string RelPath, string Symbol);
+    private record PointData(string Key, float X, float Y, float Z, string ChunkType, string RelPath, string Symbol,
+        Dictionary<string, string> Payload);
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -215,7 +235,8 @@
                 proj[i].x, proj[i].y, proj[i].z,
                 meta?.ChunkType ?? "?",
                 meta?.RelativePath ?? p.Key,
-                meta?.Symbol ?? ""
+                meta?.Symbol ?? "",
+                []
             );
         }).ToList();
 
@@ -239,12 +260,14 @@
             .ToList();
     }
 
-    private string LegendLabel(PointData p) =>
-        _colorBy == "file"
-            ? (p.RelPath.Contains('/') || p.RelPath.Contains('\\')
-                ? p.RelPath.Split('/', '\\')[0]
-                : p.RelPath)
-            : p.ChunkType;
+    private string LegendLabel(PointData p) => _colorBy switch
+    {
+        "file"     => p.RelPath.Contains('/') || p.RelPath.Contains('\\')
+                        ? p.RelPath.Split('/', '\\')[0]
+                        : p.RelPath,
+        "language" => p.Payload.TryGetValue("language", out var l) && !string.IsNullOrEmpty(l) ? l : "unknown",
+        _          => p.ChunkType
+    };
 
     private async Task DrawScene()
     {
@@ -325,7 +348,6 @@
 
         var results = Lucene.FetchByKeys([(key, 0f)]);
         _hovered = results.FirstOrDefault();
-
         if (_queryEmbedding != null && _hovered != null)
         {
             _hoveredSim = _vectorCache.TryGetValue(key, out var vec) && vec.Length > 0
@@ -379,6 +401,17 @@
         if (!_hiddenLabels.Remove(label)) _hiddenLabels.Add(label);
         await DrawScene();
     }
+
+    private static string FormatBytes(string raw)
+    {
+        if (!long.TryParse(raw, out var b)) return raw;
+        if (b < 1024) return $"{b} B";
+        if (b < 1024 * 1024) return $"{b / 1024} KB";
+        return $"{b / 1024 / 1024} MB";
+    }
+
+    private static string FormatDate(string iso) =>
+        DateTime.TryParse(iso, out var d) ? d.ToString("yyyy-MM-dd") : iso;
 
     private static string TrimContent(string c, int maxLines)
     {

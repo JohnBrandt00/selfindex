@@ -1,0 +1,173 @@
+@page "/chat"
+@using CodeIndexer.Models
+@using CodeIndexer.Services
+@inject LuceneIndexService Lucene
+@inject VectorIndexService Vectors
+@inject EmbeddingService Embeddings
+@inject IHttpClientFactory Http
+@inject IConfiguration Config
+@implements IDisposable
+
+<div class="chat-layout">
+
+  <div class="chat-toolbar px-3">
+    <span class="fw-semibold text-white me-3">Codebase Chat</span>
+    <span class="badge bg-secondary me-1">@Vectors.LiveEntries vectors</span>
+    <span class="badge" style="background:#21262d;color:#8b949e">grounded search</span>
+    <div class="ms-auto d-flex gap-2 align-items-center">
+      <button class="btn btn-sm explore-btn" @onclick="ClearChat">Clear</button>
+    </div>
+  </div>
+
+  <div class="chat-body">
+
+    <div class="chat-messages" @ref="_messagesEl">
+      @if (_messages.Count == 0)
+      {
+        <div class="chat-empty">
+          <div style="font-size:2rem;color:#30363d">💬</div>
+          <div class="text-muted mt-2 small">Ask anything about your indexed codebase.</div>
+          <div class="text-muted small mt-1" style="color:#30363d">Each answer is grounded in your actual code via vector search.</div>
+        </div>
+      }
+      @foreach (var msg in _messages)
+      {
+        <div class="chat-msg @(msg.Role == "user" ? "chat-msg-user" : "chat-msg-assistant")">
+          @if (msg.Role == "assistant" && msg.Sources.Count > 0)
+          {
+            <div class="chat-sources">
+              @foreach (var src in msg.Sources)
+              {
+                <span class="source-chip" title="@src.FilePath">@src.RelativePath:@src.StartLine</span>
+              }
+            </div>
+          }
+          <div class="chat-bubble">@((MarkupString)FormatMessage(msg.Content))</div>
+        </div>
+      }
+      @if (_thinking)
+      {
+        <div class="chat-msg chat-msg-assistant">
+          <div class="chat-bubble chat-thinking">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
+        </div>
+      }
+    </div>
+
+    <div class="chat-input-row px-3 pb-3">
+      <textarea class="chat-input" rows="2"
+                placeholder="Ask about your code..."
+                @bind="_input" @bind:event="oninput"
+                @onkeydown="OnKeyDown"
+                disabled="@_thinking"></textarea>
+      <button class="btn btn-info px-4" @onclick="Send" disabled="@(_thinking || string.IsNullOrWhiteSpace(_input))">
+        @(_thinking ? "..." : "Send")
+      </button>
+    </div>
+
+  </div>
+</div>
+
+@code {
+    private record ChatMessage(string Role, string Content, List<SearchResult> Sources);
+
+    private List<ChatMessage> _messages = [];
+    private string _input = "";
+    private bool _thinking;
+    private ElementReference _messagesEl;
+    private CancellationTokenSource? _cts;
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !e.ShiftKey) await Send();
+    }
+
+    private async Task Send()
+    {
+        var text = _input.Trim();
+        if (string.IsNullOrEmpty(text) || _thinking) return;
+        _input = "";
+        _thinking = true;
+        _messages.Add(new ChatMessage("user", text, []));
+        StateHasChanged();
+
+        try
+        {
+            // 1. Embed query and retrieve top context chunks
+            var emb     = await Embeddings.EmbedAsync(text);
+            var hits    = Vectors.Search(emb, 8);
+            var sources = Lucene.FetchByKeys(hits);
+
+            // 2. Build grounded prompt
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("You are a helpful assistant with access to the following code excerpts from the user's codebase. Answer based on these excerpts. If the answer isn't in the excerpts, say so.");
+            sb.AppendLine();
+            foreach (var s in sources)
+            {
+                sb.AppendLine($"### {s.RelativePath}:{s.StartLine}-{s.EndLine} ({s.ChunkType}{(string.IsNullOrEmpty(s.Symbol) ? "" : " " + s.Symbol)})");
+                sb.AppendLine("```");
+                sb.AppendLine(TrimContent(s.Content, 30));
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+            sb.AppendLine($"User question: {text}");
+
+            // 3. Stream response from Ollama
+            var reply = await CallOllamaAsync(sb.ToString());
+            _messages.Add(new ChatMessage("assistant", reply, sources));
+        }
+        catch (Exception ex)
+        {
+            _messages.Add(new ChatMessage("assistant", $"Error: {ex.Message}", []));
+        }
+        finally
+        {
+            _thinking = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task<string> CallOllamaAsync(string prompt)
+    {
+        var baseUrl = Config["Ollama:BaseUrl"] ?? "http://localhost:11434";
+        var model   = Config["Ollama:ChatModel"] ?? Config["Ollama:EmbeddingModel"] ?? "llama3";
+        var client  = Http.CreateClient("ollama");
+
+        var body = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            model,
+            prompt,
+            stream = false
+        });
+
+        var resp = await client.PostAsync("/api/generate",
+            new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+
+        resp.EnsureSuccessStatusCode();
+        var json = await resp.Content.ReadAsStringAsync();
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        return doc.RootElement.GetProperty("response").GetString() ?? "";
+    }
+
+    private void ClearChat() => _messages.Clear();
+
+    private static string TrimContent(string c, int maxLines)
+    {
+        var lines = c.Split('\n');
+        return lines.Length > maxLines ? string.Join('\n', lines.Take(maxLines)) + "\n..." : c;
+    }
+
+    private static string FormatMessage(string text)
+    {
+        // Basic: escape HTML then render newlines and code blocks
+        text = System.Net.WebUtility.HtmlEncode(text);
+        text = System.Text.RegularExpressions.Regex.Replace(text,
+            @"```[\w]*\n?([\s\S]*?)```",
+            m => $"<pre class='chat-code'>{m.Groups[1].Value}</pre>");
+        text = text.Replace("\n", "<br/>");
+        return text;
+    }
+
+    public void Dispose() => _cts?.Cancel();
+}

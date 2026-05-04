@@ -1,0 +1,183 @@
+@page "/health"
+@using CodeIndexer.Services
+@inject LuceneIndexService Lucene
+@inject VectorIndexService Vectors
+@inject IndexingOrchestrator Orchestrator
+@inject IndexingState State
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h4 class="mb-0">Index Health</h4>
+  <div class="d-flex gap-2">
+    <input class="form-control form-control-sm" style="width:220px"
+           @bind="_filter" @bind:event="oninput" placeholder="Filter files..." />
+    <select class="form-select form-select-sm" style="width:140px" @bind="_langFilter">
+      <option value="">All languages</option>
+      @foreach (var lang in _stats.Select(s => s.Language).Distinct().Order())
+      {
+        <option value="@lang">@lang</option>
+      }
+    </select>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="Refresh">Refresh</button>
+  </div>
+</div>
+
+<div class="row g-2 mb-3">
+  <div class="col-auto">
+    <div class="card text-center px-4 py-2">
+      <div class="fs-4 fw-bold">@_stats.Count</div>
+      <div class="text-muted small">Files</div>
+    </div>
+  </div>
+  <div class="col-auto">
+    <div class="card text-center px-4 py-2">
+      <div class="fs-4 fw-bold">@_stats.Sum(s => s.ChunkCount)</div>
+      <div class="text-muted small">Chunks</div>
+    </div>
+  </div>
+  <div class="col-auto">
+    <div class="card text-center px-4 py-2">
+      <div class="fs-4 fw-bold">@Vectors.LiveEntries</div>
+      <div class="text-muted small">Vectors</div>
+    </div>
+  </div>
+  <div class="col-auto">
+    <div class="card text-center px-4 py-2">
+      <div class="fs-4 fw-bold">@_staleCount</div>
+      <div class="text-muted small" title="File on disk has changed since last index">Stale</div>
+    </div>
+  </div>
+  <div class="col-auto">
+    <div class="card text-center px-4 py-2">
+      <div class="fs-4 fw-bold">@FormatBytes(_stats.Sum(s => s.FileSizeBytes))</div>
+      <div class="text-muted small">Total size</div>
+    </div>
+  </div>
+</div>
+
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle mb-0" style="font-size:0.8rem">
+    <thead class="table-dark sticky-top">
+      <tr>
+        <th @onclick='() => Sort("rel")' style="cursor:pointer">File @SortIcon("rel")</th>
+        <th @onclick='() => Sort("lang")' style="cursor:pointer">Lang @SortIcon("lang")</th>
+        <th @onclick='() => Sort("chunks")' style="cursor:pointer; text-align:right">Chunks @SortIcon("chunks")</th>
+        <th @onclick='() => Sort("size")' style="cursor:pointer; text-align:right">Size @SortIcon("size")</th>
+        <th @onclick='() => Sort("modified")' style="cursor:pointer">Modified @SortIcon("modified")</th>
+        <th>Status</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      @foreach (var f in Filtered)
+      {
+        var stale = _staleFiles.Contains(f.FilePath);
+        <tr class="@(stale ? "table-warning" : "")">
+          <td class="font-monospace text-truncate" style="max-width:400px" title="@f.FilePath">@f.RelPath</td>
+          <td><span class="badge bg-secondary">@f.Language</span></td>
+          <td class="text-end">@f.ChunkCount</td>
+          <td class="text-end font-monospace">@FormatBytes(f.FileSizeBytes)</td>
+          <td class="font-monospace">@FormatDate(f.LastModified)</td>
+          <td>
+            @if (stale)
+            {
+              <span class="badge bg-warning text-dark">stale</span>
+            }
+            else if (!File.Exists(f.FilePath))
+            {
+              <span class="badge bg-danger">missing</span>
+            }
+            else
+            {
+              <span class="badge bg-success">ok</span>
+            }
+          </td>
+          <td>
+            <button class="btn btn-outline-secondary btn-sm py-0 px-1" style="font-size:0.7rem"
+                    title="Re-index" @onclick="() => ReindexFile(f.FilePath)">↺</button>
+          </td>
+        </tr>
+      }
+    </tbody>
+  </table>
+</div>
+
+@code {
+    private List<LuceneIndexService.FileStats> _stats = [];
+    private HashSet<string> _staleFiles = [];
+    private int _staleCount;
+    private string _filter = "";
+    private string _langFilter = "";
+    private string _sortCol = "rel";
+    private bool _sortAsc = true;
+
+    private IEnumerable<LuceneIndexService.FileStats> Filtered =>
+        _stats
+            .Where(s => string.IsNullOrEmpty(_filter) || s.RelPath.Contains(_filter, StringComparison.OrdinalIgnoreCase))
+            .Where(s => string.IsNullOrEmpty(_langFilter) || s.Language == _langFilter)
+            .OrderBy(s => _sortAsc ? SortKey(s) : "")
+            .ThenByDescending(s => _sortAsc ? "" : SortKey(s));
+
+    private string SortKey(LuceneIndexService.FileStats s) => _sortCol switch
+    {
+        "lang"     => s.Language,
+        "chunks"   => s.ChunkCount.ToString("D10"),
+        "size"     => s.FileSizeBytes.ToString("D20"),
+        "modified" => s.LastModified,
+        _          => s.RelPath
+    };
+
+    private string SortIcon(string col) => _sortCol == col ? (_sortAsc ? "▲" : "▼") : "";
+
+    private void Sort(string col)
+    {
+        if (_sortCol == col) _sortAsc = !_sortAsc;
+        else { _sortCol = col; _sortAsc = true; }
+    }
+
+    protected override void OnInitialized() => Refresh();
+
+    private void Refresh()
+    {
+        _stats = Lucene.GetFileStats();
+        _staleFiles = _stats
+            .Where(s => IsStale(s))
+            .Select(s => s.FilePath)
+            .ToHashSet();
+        _staleCount = _staleFiles.Count;
+    }
+
+    private static bool IsStale(LuceneIndexService.FileStats s)
+    {
+        if (!File.Exists(s.FilePath) || string.IsNullOrEmpty(s.Md5)) return false;
+        try
+        {
+            using var md5 = System.Security.Cryptography.MD5.Create();
+            var hash = Convert.ToHexString(md5.ComputeHash(File.ReadAllBytes(s.FilePath))).ToLowerInvariant();
+            return hash != s.Md5;
+        }
+        catch { return false; }
+    }
+
+    private void ReindexFile(string filePath)
+    {
+        _ = Task.Run(async () =>
+        {
+            await Orchestrator.ReindexFileAsync(filePath);
+            await InvokeAsync(Refresh);
+            await InvokeAsync(StateHasChanged);
+        });
+    }
+
+    private static string FormatDate(string iso) =>
+        DateTime.TryParse(iso, out var d) ? d.ToString("yyyy-MM-dd HH:mm") : iso;
+
+    private static string FormatBytes(long b)
+    {
+        if (b < 1024) return $"{b} B";
+        if (b < 1024 * 1024) return $"{b / 1024} KB";
+        return $"{b / 1024 / 1024} MB";
+    }
+
+    private static string FormatBytes(string raw) =>
+        long.TryParse(raw, out var b) ? FormatBytes(b) : raw;
+}

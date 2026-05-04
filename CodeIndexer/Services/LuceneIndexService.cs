@@ -21,6 +21,10 @@ public class LuceneIndexService : IDisposable
     private const string F_CONTENT  = "content";
     private const string F_START    = "start";
     private const string F_END      = "end";
+    private const string F_MD5      = "md5";
+    private const string F_MODIFIED = "last_modified";
+    private const string F_SIZE     = "file_size";
+    private const string F_LANG     = "language";
 
     private readonly FSDirectory _directory;
     private readonly StandardAnalyzer _analyzer;
@@ -46,7 +50,7 @@ public class LuceneIndexService : IDisposable
 
     // ── Write ──────────────────────────────────────────────────────────────────
 
-    public void Upsert(CodeChunk chunk)
+    public void Upsert(CodeChunk chunk, Dictionary<string, object>? meta = null)
     {
         var doc = new Document
         {
@@ -61,12 +65,33 @@ public class LuceneIndexService : IDisposable
             new StoredField(F_END,     chunk.EndLine),
         };
 
+        if (meta != null)
+        {
+            doc.Add(new StoredField(F_MD5,      meta.TryGetValue("md5",             out var md5)  ? md5.ToString()  : ""));
+            doc.Add(new StoredField(F_MODIFIED, meta.TryGetValue("last_modified",   out var lm)   ? lm.ToString()   : ""));
+            doc.Add(new StoredField(F_SIZE,     meta.TryGetValue("file_size_bytes", out var sz)   ? sz.ToString()   : ""));
+            doc.Add(new StoredField(F_LANG,     meta.TryGetValue("language",        out var lang) ? lang.ToString() : ""));
+        }
+
         var docKey = $"{chunk.FilePath}:{chunk.StartLine}";
         doc.Add(new StringField("doc_key", docKey, Field.Store.YES));
         _writer.UpdateDocument(new Term("doc_key", docKey), doc);
     }
 
     public void Commit() => _writer.Commit();
+
+    /// <summary>Returns the stored md5 for the first chunk of a file, or null if not indexed.</summary>
+    public string? GetStoredMd5(string filePath)
+    {
+        lock (_searchLock)
+        {
+            using var reader  = _writer.GetReader(applyAllDeletes: true);
+            var searcher = new IndexSearcher(reader);
+            var hits = searcher.Search(new TermQuery(new Term(F_PATH, filePath)), 1);
+            if (hits.ScoreDocs.Length == 0) return null;
+            return searcher.Doc(hits.ScoreDocs[0].Doc).Get(F_MD5);
+        }
+    }
 
     public void DeleteByPath(string filePath)
     {
@@ -160,6 +185,53 @@ public class LuceneIndexService : IDisposable
         }
     }
 
+    public record FileStats(string RelPath, string FilePath, int ChunkCount, string Language, string LastModified, string Md5, long FileSizeBytes);
+
+    public List<FileStats> GetFileStats()
+    {
+        lock (_searchLock)
+        {
+            using var reader  = _writer.GetReader(applyAllDeletes: true);
+            var searcher = new IndexSearcher(reader);
+            var hits     = searcher.Search(new MatchAllDocsQuery(), reader.NumDocs);
+            return hits.ScoreDocs
+                .Select(h => searcher.Doc(h.Doc))
+                .GroupBy(d => d.Get(F_PATH) ?? "")
+                .Where(g => g.Key.Length > 0)
+                .Select(g =>
+                {
+                    var first = g.First();
+                    return new FileStats(
+                        first.Get(F_REL) ?? g.Key,
+                        g.Key,
+                        g.Count(),
+                        first.Get(F_LANG) ?? "",
+                        first.Get(F_MODIFIED) ?? "",
+                        first.Get(F_MD5) ?? "",
+                        long.TryParse(first.Get(F_SIZE), out var sz) ? sz : 0
+                    );
+                })
+                .OrderBy(f => f.RelPath)
+                .ToList();
+        }
+    }
+
+    public List<string> GetDistinctLanguages()
+    {
+        lock (_searchLock)
+        {
+            using var reader  = _writer.GetReader(applyAllDeletes: true);
+            var searcher = new IndexSearcher(reader);
+            var hits     = searcher.Search(new MatchAllDocsQuery(), reader.NumDocs);
+            return hits.ScoreDocs
+                .Select(h => searcher.Doc(h.Doc).Get(F_LANG) ?? "")
+                .Where(l => l.Length > 0)
+                .Distinct()
+                .OrderBy(l => l)
+                .ToList();
+        }
+    }
+
     public List<SearchResult> GetRecent(int n = 20)
     {
         lock (_searchLock)
@@ -180,17 +252,21 @@ public class LuceneIndexService : IDisposable
     private static SearchResult DocToResult(Document doc, float bm25, float vec, float hybrid) =>
         new()
         {
-            Id           = doc.Get(F_ID)      ?? "",
-            FilePath     = doc.Get(F_PATH)    ?? "",
-            RelativePath = doc.Get(F_REL)     ?? "",
-            ChunkType    = doc.Get(F_TYPE)    ?? "",
-            Symbol       = doc.Get(F_SYMBOL)  ?? "",
-            Content      = doc.Get(F_CONTENT) ?? "",
+            Id           = doc.Get(F_ID)       ?? "",
+            FilePath     = doc.Get(F_PATH)     ?? "",
+            RelativePath = doc.Get(F_REL)      ?? "",
+            ChunkType    = doc.Get(F_TYPE)     ?? "",
+            Symbol       = doc.Get(F_SYMBOL)   ?? "",
+            Content      = doc.Get(F_CONTENT)  ?? "",
             StartLine    = int.TryParse(doc.Get(F_START), out var s) ? s : 0,
             EndLine      = int.TryParse(doc.Get(F_END),   out var e) ? e : 0,
             BM25Score    = bm25,
             VectorScore  = vec,
             HybridScore  = hybrid,
+            Md5          = doc.Get(F_MD5)      ?? "",
+            LastModified = doc.Get(F_MODIFIED) ?? "",
+            FileSize     = doc.Get(F_SIZE)     ?? "",
+            Language     = doc.Get(F_LANG)     ?? "",
         };
 
     public void Dispose()

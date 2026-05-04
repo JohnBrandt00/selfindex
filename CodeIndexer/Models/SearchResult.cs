@@ -13,4 +13,10 @@ public class SearchResult
     public float BM25Score { get; set; }
     public float VectorScore { get; set; }
     public float HybridScore { get; set; }
+
+    // Enricher metadata
+    public string Md5 { get; set; } = "";
+    public string LastModified { get; set; } = "";
+    public string FileSize { get; set; } = "";
+    public string Language { get; set; } = "";
 }

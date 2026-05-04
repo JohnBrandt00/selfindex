@@ -5,10 +5,11 @@
 @inject VectorIndexService Vectors
 @inject EmbeddingService Embeddings
 @inject IndexingState State
+@inject IndexingOrchestrator Orchestrator
 
 <h4 class="mb-3">Search Code Index</h4>
 
-<div class="row g-2 mb-3">
+<div class="row g-2 mb-2">
   <div class="col">
     <input class="form-control font-monospace"
            @bind="_query"
@@ -30,13 +31,42 @@
   </div>
 </div>
 
-<div class="row g-2 mb-2">
-  <div class="col-auto d-flex align-items-center">
-    <span class="text-muted small me-2">Exclude files:</span>
-    <input class="form-control form-control-sm font-monospace" style="width:320px"
-           @bind="_exclude"
-           @bind:event="oninput"
-           placeholder="e.g. test, migrations, *.min.js" />
+<div class="row g-2 mb-2 align-items-center">
+  <div class="col-auto d-flex align-items-center gap-2">
+    <span class="text-muted small">Exclude:</span>
+    <input class="form-control form-control-sm font-monospace" style="width:240px"
+           @bind="_exclude" @bind:event="oninput"
+           placeholder="test, *.min.js, migrations" />
+  </div>
+  <div class="col-auto d-flex align-items-center gap-2">
+    <span class="text-muted small">Type:</span>
+    <select class="form-select form-select-sm" style="width:130px" @bind="_filterType">
+      <option value="">All types</option>
+      <option value="class">class</option>
+      <option value="method">method</option>
+      <option value="file">file</option>
+      <option value="page">page</option>
+      <option value="section">section</option>
+      <option value="image">image</option>
+      <option value="block">block</option>
+    </select>
+  </div>
+  <div class="col-auto d-flex align-items-center gap-2">
+    <span class="text-muted small">Language:</span>
+    <select class="form-select form-select-sm" style="width:140px" @bind="_filterLang">
+      <option value="">All languages</option>
+      @foreach (var lang in _availableLangs)
+      {
+        <option value="@lang">@lang</option>
+      }
+    </select>
+  </div>
+  <div class="col-auto ms-auto d-flex align-items-center gap-3">
+    <div class="form-check form-switch mb-0">
+      <input class="form-check-input" type="checkbox" id="rawToggle" @bind="_rawLucene" />
+      <label class="form-check-label small" for="rawToggle">Raw Lucene</label>
+    </div>
+    <a href="/ai-endpoint" class="text-muted small">MCP →</a>
   </div>
 </div>
 
@@ -47,31 +77,43 @@
   <span class="badge @(_mode == "hybrid" ? "bg-primary" : "bg-secondary")">
     @(_mode == "hybrid" ? "RRF hybrid" : _mode == "vector" ? "HNSW cosine" : "BM25 keyword")
   </span>
-  <div class="form-check form-switch mb-0 ms-1">
-    <input class="form-check-input" type="checkbox" id="rawToggle" @bind="_rawLucene" />
-    <label class="form-check-label" for="rawToggle">Raw Lucene syntax</label>
-  </div>
-  <a href="/ai-endpoint" class="ms-auto text-muted small">MCP endpoint →</a>
 </div>
 
 @if (_error != null) { <div class="alert alert-danger">@_error</div> }
 
 @if (_results.Count > 0)
 {
-  <div class="mb-2 text-muted small">@_results.Count results in @_elapsedMs ms</div>
-  @foreach (var r in _results)
+  <div class="mb-2 text-muted small">@_filtered.Count results (@_results.Count before filters) in @_elapsedMs ms</div>
+  @foreach (var r in _filtered)
   {
     <div class="card mb-2 result-card">
-      <div class="card-header d-flex justify-content-between align-items-center py-1">
-        <div>
-          <span class="badge @BadgeColor(r.ChunkType) me-1">@r.ChunkType</span>
+      <div class="card-header d-flex justify-content-between align-items-center py-1 flex-wrap gap-1">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <span class="badge @BadgeColor(r.ChunkType)">@r.ChunkType</span>
+          @if (!string.IsNullOrEmpty(r.Language))
+          {
+            <span class="badge bg-dark text-secondary border border-secondary" style="font-size:0.65rem">@r.Language</span>
+          }
           <span class="fw-semibold">@r.Symbol</span>
-          <span class="text-muted small ms-2 font-monospace">@r.RelativePath:@r.StartLine</span>
+          <span class="text-muted small font-monospace">@r.RelativePath:@r.StartLine</span>
         </div>
-        <div class="small text-muted font-monospace">
-          @if (r.BM25Score > 0)   { <span class="me-2">bm25: @r.BM25Score.ToString("F3")</span> }
-          @if (r.VectorScore > 0) { <span class="me-2">cos: @r.VectorScore.ToString("F3")</span> }
-          @if (r.HybridScore > 0) { <span>rrf: @r.HybridScore.ToString("F4")</span> }
+        <div class="d-flex align-items-center gap-2">
+          <div class="small text-muted font-monospace">
+            @if (r.BM25Score > 0)   { <span class="me-1">bm25:@r.BM25Score.ToString("F2")</span> }
+            @if (r.VectorScore > 0) { <span class="me-1">cos:@r.VectorScore.ToString("F2")</span> }
+            @if (r.HybridScore > 0) { <span>rrf:@r.HybridScore.ToString("F4")</span> }
+          </div>
+          @if (!string.IsNullOrEmpty(r.LastModified))
+          {
+            <span class="text-muted small" title="@r.LastModified">@FormatDate(r.LastModified)</span>
+          }
+          @if (!string.IsNullOrEmpty(r.FileSize))
+          {
+            <span class="text-muted small">@FormatBytes(r.FileSize)</span>
+          }
+          <button class="btn btn-outline-secondary btn-sm py-0 px-1" style="font-size:0.65rem"
+                  title="Re-index this file"
+                  @onclick="() => ReindexFile(r.FilePath)">↺</button>
         </div>
       </div>
       <div class="card-body p-0">
@@ -92,13 +134,23 @@ else if (!State.IsWatching && Lucene.DocumentCount == 0)
 }
 
 @code {
-    private string _query   = "";
-    private string _exclude = "";
-    private string _mode    = "hybrid";
-    private bool _searching, _searched, _rawLucene;
+    private string _query      = "";
+    private string _exclude    = "";
+    private string _filterType = "";
+    private string _filterLang = "";
+    private string _mode       = "hybrid";
+    private bool   _searching, _searched, _rawLucene;
     private string? _error;
     private long _elapsedMs;
-    private List<SearchResult> _results = [];
+    private List<SearchResult> _results  = [];
+    private List<SearchResult> _filtered = [];
+    private List<string> _availableLangs = [];
+
+    protected override void OnInitialized()
+    {
+        // Populate language list from recent docs
+        _availableLangs = Lucene.GetDistinctLanguages();
+    }
 
     private async Task OnKeyDown(KeyboardEventArgs e)
     {
@@ -113,34 +165,47 @@ else if (!State.IsWatching && Lucene.DocumentCount == 0)
         try
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var raw = _mode switch
+            _results = _mode switch
             {
-                "text"   => Lucene.TextSearch(_query, 15, _rawLucene).Select(t => t.result).ToList(),
+                "text"   => Lucene.TextSearch(_query, 30, _rawLucene).Select(t => t.result).ToList(),
                 "vector" => await RunVectorAsync(),
                 _        => await RunHybridAsync()
             };
-            _results = ApplyExclusions(raw);
             _elapsedMs = sw.ElapsedMilliseconds;
+            ApplyFilters();
         }
-        catch (Exception ex) { _error = ex.Message; _results = []; }
+        catch (Exception ex) { _error = ex.Message; _results = []; _filtered = []; }
         finally { _searching = false; }
+    }
+
+    private void ApplyFilters()
+    {
+        _filtered = _results
+            .Where(r => string.IsNullOrEmpty(_filterType) || r.ChunkType == _filterType)
+            .Where(r => string.IsNullOrEmpty(_filterLang) || r.Language == _filterLang)
+            .Where(r => !MatchesExclusion(r))
+            .ToList();
+    }
+
+    private bool MatchesExclusion(SearchResult r)
+    {
+        var patterns = _exclude.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return patterns.Any(p => MatchesPattern(r.RelativePath, p));
     }
 
     private async Task<List<SearchResult>> RunVectorAsync()
     {
         var emb = await Embeddings.EmbedAsync(_query);
-        return Lucene.FetchByKeys(Vectors.Search(emb, 15));
+        return Lucene.FetchByKeys(Vectors.Search(emb, 20));
     }
 
     private async Task<List<SearchResult>> RunHybridAsync()
     {
         const int k = 60;
         var emb        = await Embeddings.EmbedAsync(_query);
-        var textHits   = Lucene.TextSearch(_query, 45, _rawLucene);
-        var vectorHits = Vectors.Search(emb, 45);
+        var textHits   = Lucene.TextSearch(_query, 60, _rawLucene);
+        var vectorHits = Vectors.Search(emb, 60);
 
-        // When raw Lucene is on, filter vector results through the same query
-        // so NOT clauses (e.g. NOT file:docker-compose.yml) apply to both sides
         if (_rawLucene && !string.IsNullOrWhiteSpace(_query))
         {
             var allowed = Lucene.FilterKeysByQuery(vectorHits.Select(h => h.key), _query);
@@ -161,7 +226,7 @@ else if (!State.IsWatching && Lucene.DocumentCount == 0)
             rrf[key] = rrf.TryGetValue(key, out var e) ? (e.score + c, e.bm25, cos) : (c, 0, cos);
         }
 
-        var ranked = rrf.OrderByDescending(kv => kv.Value.score).Take(15).ToList();
+        var ranked = rrf.OrderByDescending(kv => kv.Value.score).Take(20).ToList();
         var docs   = Lucene.FetchByKeys(ranked.Select(kv => (kv.Key, kv.Value.vec)));
         foreach (var doc in docs)
         {
@@ -172,27 +237,12 @@ else if (!State.IsWatching && Lucene.DocumentCount == 0)
         return docs.OrderByDescending(d => d.HybridScore).ToList();
     }
 
-    private List<SearchResult> ApplyExclusions(List<SearchResult> results)
-    {
-        var patterns = _exclude.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(p => p.Length > 0)
-            .ToList();
-        if (patterns.Count == 0) return results;
-
-        return results.Where(r => !patterns.Any(p => MatchesPattern(r.RelativePath, p))).ToList();
-    }
-
     private static bool MatchesPattern(string path, string pattern)
     {
-        // Simple glob: * matches any sequence of chars within a segment, ** matches across /
-        // For basic use, just check if any path segment or the full path contains the pattern (case-insensitive)
-        // Support leading/trailing * as wildcard, otherwise substring match
-        path = path.Replace('\\', '/').ToLowerInvariant();
+        path    = path.Replace('\\', '/').ToLowerInvariant();
         pattern = pattern.ToLowerInvariant();
-
         if (pattern.Contains('*'))
         {
-            // Convert glob to a simple check: split on * and verify all parts appear in order
             var parts = pattern.Split('*', StringSplitOptions.RemoveEmptyEntries);
             int pos = 0;
             foreach (var part in parts)
@@ -203,16 +253,29 @@ else if (!State.IsWatching && Lucene.DocumentCount == 0)
             }
             return true;
         }
-
-        // No wildcard: match against any path segment or the full path
-        return path.Contains(pattern) ||
-               path.Split('/').Any(seg => seg == pattern);
+        return path.Contains(pattern) || path.Split('/').Any(seg => seg == pattern);
     }
 
     private static string TrimContent(string content)
     {
         var lines = content.Split('\n');
         return lines.Length > 20 ? string.Join('\n', lines.Take(20)) + "\n..." : content;
+    }
+
+    private static string FormatDate(string iso) =>
+        DateTime.TryParse(iso, out var d) ? d.ToString("yyyy-MM-dd") : iso;
+
+    private static string FormatBytes(string raw)
+    {
+        if (!long.TryParse(raw, out var b)) return raw;
+        if (b < 1024) return $"{b} B";
+        if (b < 1024 * 1024) return $"{b / 1024} KB";
+        return $"{b / 1024 / 1024} MB";
+    }
+
+    private void ReindexFile(string filePath)
+    {
+        _ = Task.Run(() => Orchestrator.ReindexFileAsync(filePath));
     }
 
     private string ModeBtn(string m) => _mode == m ? "btn-primary" : "btn-outline-primary";
